@@ -640,9 +640,32 @@ class Handler(BaseHTTPRequestHandler):
             return fwd.split(",")[0].strip()
         return self.client_address[0] if self.client_address else ""
 
+    def _read_chunked(self):
+        """Lit un corps HTTP en Transfer-Encoding: chunked.
+
+        L'exporteur OTLP de Claude Code (OTel-JS) streame le corps sans
+        Content-Length ; BaseHTTPRequestHandler ne le decode pas seul.
+        """
+        chunks = []
+        while True:
+            size_line = self.rfile.readline().strip()
+            # taille en hexa, eventuelles extensions apres ';'
+            size = int(size_line.split(b";", 1)[0] or b"0", 16)
+            if size == 0:
+                # consomme les trailers eventuels jusqu'a la ligne vide
+                while self.rfile.readline().strip():
+                    pass
+                break
+            chunks.append(self.rfile.read(size))
+            self.rfile.read(2)  # CRLF de fin de chunk
+        return b"".join(chunks)
+
     def _read_body(self):
-        length = int(self.headers.get("Content-Length") or 0)
-        raw = self.rfile.read(length) if length else b""
+        if "chunked" in (self.headers.get("Transfer-Encoding") or "").lower():
+            raw = self._read_chunked()
+        else:
+            length = int(self.headers.get("Content-Length") or 0)
+            raw = self.rfile.read(length) if length else b""
         if (self.headers.get("Content-Encoding") or "").lower() == "gzip":
             try:
                 raw = gzip.decompress(raw)

@@ -13,3 +13,4 @@ node_modules/
 
 # Reglages locaux (pas de secrets, mais specifiques a la machine de dev)
 .claude/settings.local.json
+*.log
