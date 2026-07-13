@@ -1,0 +1,15 @@
+# Donnees de telemetrie : jamais dans un depot public (prompts en clair, IP).
+telemetry.db
+telemetry.db-shm
+telemetry.db-wal
+
+# Python
+__pycache__/
+*.pyc
+
+# Node
+node_modules/
+*.tgz
+
+# Reglages locaux (pas de secrets, mais specifiques a la machine de dev)
+.claude/settings.local.json

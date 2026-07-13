@@ -1,0 +1,370 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Moniteur Claude Code</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+<style>
+  :root{
+    --bg:#0f1115; --panel:#181b22; --panel2:#1f232c; --line:#2a2f3a;
+    --text:#e6e9ef; --muted:#9aa4b2; --accent:#d97757; --accent2:#6ea8fe;
+    --green:#5cc98a; --red:#e5776b;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font-family:system-ui,Segoe UI,Roboto,Arial,sans-serif;
+       background:var(--bg);color:var(--text)}
+  header{padding:20px 28px;border-bottom:1px solid var(--line);
+         display:flex;align-items:center;gap:16px;flex-wrap:wrap}
+  header h1{font-size:18px;margin:0;font-weight:600}
+  .grow{flex:1}
+  .muted{color:var(--muted);font-size:13px}
+  .range button{background:var(--panel2);color:var(--text);border:1px solid var(--line);
+    padding:6px 12px;border-radius:8px;cursor:pointer;font-size:13px;margin-left:6px}
+  .range button.active{background:var(--accent);border-color:var(--accent);color:#fff}
+  main{padding:24px 28px;max-width:1200px;margin:0 auto}
+  .tabs{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:20px}
+  .tab{background:var(--panel);border:1px solid var(--line);color:var(--muted);
+    padding:8px 16px;border-radius:20px;cursor:pointer;font-size:13px}
+  .tab.active{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600}
+  .tab .ip{display:block;font-size:10px;opacity:.75;font-family:ui-monospace,Consolas,monospace}
+  td.user,th.user{color:var(--muted)}
+  .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:14px;margin-bottom:24px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px}
+  .card .label{color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:.04em}
+  .card .value{font-size:26px;font-weight:700;margin-top:6px}
+  .card .value.sm{font-size:17px;font-family:ui-monospace,Consolas,monospace}
+  .card .sub{color:var(--muted);font-size:12px;margin-top:4px}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;
+    padding:18px;margin-bottom:24px}
+  .panel h2{font-size:14px;margin:0 0 14px;font-weight:600;color:var(--text);
+    display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line);
+    vertical-align:top}
+  th{color:var(--muted);font-weight:600;font-size:12px;text-transform:uppercase}
+  td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
+  td.ip,th.ip{font-family:ui-monospace,Consolas,monospace;font-size:12px;color:var(--muted)}
+  td.time{white-space:nowrap;font-variant-numeric:tabular-nums;color:var(--muted)}
+  .pill{display:inline-block;padding:2px 8px;border-radius:10px;font-size:11px}
+  .pill.acc{background:rgba(92,201,138,.15);color:var(--green)}
+  .pill.rej{background:rgba(229,119,107,.15);color:var(--red)}
+  .empty{color:var(--muted);text-align:center;padding:40px}
+  .warn{background:rgba(217,119,87,.1);border:1px solid rgba(217,119,87,.35);
+    color:#f0b9a4;border-radius:10px;padding:12px 14px;font-size:13px;margin-bottom:16px}
+  .warn code{background:rgba(0,0,0,.3);padding:1px 6px;border-radius:4px;
+    font-family:ui-monospace,Consolas,monospace}
+  canvas{max-height:280px}
+  a{color:var(--accent2)}
+  input[type=search]{background:var(--panel2);border:1px solid var(--line);
+    color:var(--text);border-radius:8px;padding:6px 12px;font-size:13px;min-width:240px}
+  input[type=search]:focus{outline:none;border-color:var(--accent)}
+  .prompt-text{white-space:pre-wrap;word-break:break-word;line-height:1.45;
+    max-width:640px;cursor:pointer}
+  .prompt-text.clamped{display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;
+    overflow:hidden}
+  .prompt-text mark{background:rgba(217,119,87,.35);color:inherit;border-radius:2px}
+</style>
+</head>
+<body>
+<header>
+  <h1>🖥️ Moniteur Claude Code</h1>
+  <span class="muted" id="updated"></span>
+  <span class="grow"></span>
+  <div class="range">
+    <span class="muted">Periode :</span>
+    <button data-days="1">24 h</button>
+    <button data-days="7" class="active">7 j</button>
+    <button data-days="30">30 j</button>
+    <button data-days="0">Tout</button>
+  </div>
+</header>
+<main>
+  <div class="tabs" id="tabs"></div>
+  <div class="cards" id="cards"></div>
+
+  <div class="panel" id="machinesPanel">
+    <h2>Machines</h2>
+    <div id="machines"></div>
+  </div>
+
+  <div class="panel">
+    <h2>Cout par jour (USD)</h2>
+    <canvas id="chart"></canvas>
+  </div>
+
+  <div class="panel">
+    <h2>Detail par modele</h2>
+    <div id="models"></div>
+  </div>
+
+  <div class="panel">
+    <h2>
+      Prompts
+      <span class="grow"></span>
+      <input type="search" id="promptSearch" placeholder="Rechercher dans les prompts...">
+    </h2>
+    <div id="promptsWarn"></div>
+    <div id="prompts"><div class="empty">Chargement...</div></div>
+  </div>
+
+  <div class="panel">
+    <h2>Activite recente</h2>
+    <div id="recent"></div>
+  </div>
+</main>
+
+<script>
+let DATA = null, DAYS = 7, TAB = "__ALL__", chart = null;
+let PROMPTS = [], QUERY = "", searchTimer = null;
+
+const palette = ["#d97757","#6ea8fe","#5cc98a","#e5c07b","#c678dd","#56b6c2","#e5776b","#98c379"];
+const fmt = n => (n||0).toLocaleString("fr-FR");
+const usd = n => "$" + (Number(n)||0).toFixed(2);
+
+async function load(){
+  const r = await fetch("/api/stats?days=" + DAYS);
+  DATA = await r.json();
+  document.getElementById("updated").textContent = "Mis a jour : " + DATA.generated_at;
+  renderTabs(); render();
+  loadPrompts();
+}
+
+async function loadPrompts(){
+  const p = new URLSearchParams({days: DAYS});
+  if(TAB !== "__ALL__") p.set("machine", TAB);
+  if(QUERY) p.set("q", QUERY);
+  const r = await fetch("/api/prompts?" + p);
+  PROMPTS = (await r.json()).prompts || [];
+  renderPrompts();
+}
+
+function renderTabs(){
+  const el = document.getElementById("tabs");
+  let html = `<div class="tab ${TAB==="__ALL__"?"active":""}" data-tab="__ALL__">Toutes les machines</div>`;
+  for(const m of DATA.machines){
+    const sub = [m.ip, m.user].filter(Boolean).join(" · ");
+    html += `<div class="tab ${TAB===m.machine?"active":""}" data-tab="${esc(m.machine)}">
+      ${esc(m.machine)}${sub?`<span class="ip">${esc(sub)}</span>`:""}</div>`;
+  }
+  el.innerHTML = html;
+  el.querySelectorAll(".tab").forEach(t=>t.onclick=()=>{
+    TAB=t.dataset.tab; renderTabs(); render(); loadPrompts();
+  });
+}
+
+function current(){
+  if(TAB==="__ALL__") return DATA.totals;
+  return DATA.machines.find(m=>m.machine===TAB) || DATA.totals;
+}
+
+function render(){
+  const d = current();
+  const accRate = (d.tools.accepted+d.tools.rejected)>0
+    ? Math.round(100*d.tools.accepted/(d.tools.accepted+d.tools.rejected)) : null;
+  const card = (label,value,sub,cls)=>`<div class="card"><div class="label">${label}</div>
+    <div class="value ${cls||""}">${value}</div><div class="sub">${sub||""}</div></div>`;
+
+  let cards =
+    card("Cout total", usd(d.cost_usd), "estime")
+    + card("Tokens", fmt(d.tokens.total),
+        `${fmt(d.tokens.input)} in · ${fmt(d.tokens.output)} out · ${fmt(d.tokens.cache_read+d.tokens.cache_creation)} cache`)
+    + card("Sessions", fmt(d.sessions), fmt(d.api_requests)+" requetes API")
+    + card("Prompts", fmt(d.prompts), fmt(d.api_errors)+" erreurs")
+    + card("Lignes de code", "+"+fmt(d.lines_added), "−"+fmt(d.lines_removed))
+    + card("Commits / PR", fmt(d.commits)+" / "+fmt(d.pull_requests), "via Claude Code")
+    + card("Outils acceptes", accRate===null?"—":accRate+"%",
+        `${fmt(d.tools.accepted)} oui · ${fmt(d.tools.rejected)} non`)
+    + card("Temps actif", (d.active_seconds? Math.round(d.active_seconds/60):0)+" min", "");
+
+  if(TAB==="__ALL__"){
+    cards = card("Machines", fmt(DATA.machines.length), "vues sur la periode") + cards;
+  } else {
+    const ipSub = (d.ips && d.ips.length>1) ? `+${d.ips.length-1} autre(s) IP` : "derniere IP vue";
+    const userSub = (d.users && d.users.length>1) ? `+${d.users.length-1} autre(s)` : "derniere session vue";
+    cards = card("Utilisateur", esc(d.user||"—"), userSub, "sm")
+          + card("Adresse IP", esc(d.ip||"—"), ipSub, "sm") + cards;
+  }
+  document.getElementById("cards").innerHTML = cards;
+
+  renderMachines();
+  renderChart();
+  renderModels(d);
+  renderRecent();
+}
+
+function renderMachines(){
+  const panel = document.getElementById("machinesPanel");
+  panel.style.display = TAB==="__ALL__" ? "" : "none";
+  if(TAB!=="__ALL__") return;
+
+  const el = document.getElementById("machines");
+  if(!DATA.machines.length){
+    el.innerHTML='<div class="empty">Aucune machine n\'a encore envoye de donnees.</div>'; return; }
+
+  let h = `<table><thead><tr><th>Machine</th><th class="user">Utilisateur</th>
+    <th class="ip">Adresse IP</th>
+    <th class="num">Cout</th><th class="num">Tokens</th><th class="num">Sessions</th>
+    <th class="num">Prompts</th><th>Derniere activite (UTC)</th></tr></thead><tbody>`;
+  for(const m of DATA.machines){
+    const listCell = (list)=> list.length ? esc(list[0]) + (list.length>1
+      ? ` <span class="muted">+${list.length-1}</span>` : "") : "—";
+    h += `<tr><td>${esc(m.machine)}</td><td class="user">${listCell(m.users||[])}</td>
+      <td class="ip">${listCell(m.ips||[])}</td>
+      <td class="num">${usd(m.cost_usd)}</td><td class="num">${fmt(m.tokens.total)}</td>
+      <td class="num">${fmt(m.sessions)}</td><td class="num">${fmt(m.prompts)}</td>
+      <td class="time">${m.last_ms? esc(tsFmt(m.last_ms)) : "—"}</td></tr>`;
+  }
+  el.innerHTML = h + "</tbody></table>";
+}
+
+function tsFmt(ms){
+  return new Date(ms).toISOString().replace("T"," ").slice(0,19);
+}
+
+function renderChart(){
+  const days = [...new Set(DATA.timeline.map(t=>t.day))].sort();
+  let series;
+  if(TAB==="__ALL__"){
+    const names = DATA.machines.map(m=>m.machine);
+    series = names.map((name,i)=>({
+      label:name, borderColor:palette[i%palette.length],
+      backgroundColor:palette[i%palette.length], tension:.25,
+      data: days.map(dy=>{
+        const row = DATA.timeline.find(t=>t.day===dy && t.machine===name);
+        return row? row.cost_usd : 0;
+      })
+    }));
+  } else {
+    series = [{
+      label:TAB, borderColor:palette[0], backgroundColor:palette[0], tension:.25,
+      data: days.map(dy=>{
+        const row = DATA.timeline.find(t=>t.day===dy && t.machine===TAB);
+        return row? row.cost_usd : 0;
+      })
+    }];
+  }
+  const ctx = document.getElementById("chart");
+  if(chart) chart.destroy();
+  chart = new Chart(ctx,{
+    type:"line",
+    data:{labels:days, datasets:series},
+    options:{responsive:true,
+      plugins:{legend:{labels:{color:"#9aa4b2"}}},
+      scales:{
+        x:{ticks:{color:"#9aa4b2"},grid:{color:"#2a2f3a"}},
+        y:{ticks:{color:"#9aa4b2",callback:v=>"$"+(Math.round(v*100)/100)},grid:{color:"#2a2f3a"}}
+      }}
+  });
+}
+
+function renderModels(d){
+  const models = d.by_model || [];
+  if(TAB==="__ALL__"){
+    // agrege tous les modeles de toutes les machines
+    const agg = {};
+    for(const m of DATA.machines) for(const bm of (m.by_model||[])){
+      const a = agg[bm.model] = agg[bm.model]||{model:bm.model,input:0,output:0,cost_usd:0};
+      a.input+=bm.input; a.output+=bm.output; a.cost_usd+=bm.cost_usd;
+    }
+    return renderModelTable(Object.values(agg).sort((a,b)=>b.cost_usd-a.cost_usd));
+  }
+  renderModelTable(models);
+}
+
+function renderModelTable(models){
+  const el = document.getElementById("models");
+  if(!models.length){ el.innerHTML='<div class="empty">Aucune donnee sur cette periode.</div>'; return; }
+  let h = `<table><thead><tr><th>Modele</th><th class="num">Tokens in</th>
+    <th class="num">Tokens out</th><th class="num">Cout</th></tr></thead><tbody>`;
+  for(const m of models){
+    h += `<tr><td>${esc(m.model)}</td><td class="num">${fmt(m.input)}</td>
+      <td class="num">${fmt(m.output)}</td><td class="num">${usd(m.cost_usd)}</td></tr>`;
+  }
+  el.innerHTML = h + "</tbody></table>";
+}
+
+function renderPrompts(){
+  const el = document.getElementById("prompts");
+  const warn = document.getElementById("promptsWarn");
+  const d = current();
+
+  // Des prompts ont eu lieu, mais aucun texte n'a ete recu : option non activee.
+  const seen = d.prompts||0, logged = d.prompts_logged||0;
+  warn.innerHTML = (seen>0 && logged===0)
+    ? `<div class="warn">Le contenu des prompts n'est pas enregistre.
+       Activez <code>OTEL_LOG_USER_PROMPTS=1</code> sur ${TAB==="__ALL__"?"les machines":"cette machine"},
+       puis rouvrez un nouveau terminal.</div>`
+    : "";
+
+  if(!PROMPTS.length){
+    el.innerHTML = `<div class="empty">${QUERY
+      ? "Aucun prompt ne correspond a cette recherche."
+      : "Aucun prompt enregistre sur cette periode."}</div>`;
+    return;
+  }
+
+  let h = `<table><thead><tr><th>Heure (UTC)</th><th>Machine</th><th class="user">Utilisateur</th>
+    <th class="ip">IP</th>
+    <th>Prompt</th><th class="num">Car.</th></tr></thead><tbody>`;
+  for(const p of PROMPTS){
+    h += `<tr><td class="time">${esc(p.time)}</td><td>${esc(p.machine)}</td>
+      <td class="user">${esc(p.user||"—")}</td>
+      <td class="ip">${esc(p.ip||"—")}</td>
+      <td><div class="prompt-text clamped" title="Cliquer pour deplier">${highlight(p.text)}</div></td>
+      <td class="num">${fmt(p.length)}</td></tr>`;
+  }
+  el.innerHTML = h + "</tbody></table>";
+  el.querySelectorAll(".prompt-text").forEach(n=>{
+    n.onclick = ()=> n.classList.toggle("clamped");
+  });
+}
+
+function highlight(text){
+  const safe = esc(text);
+  if(!QUERY) return safe;
+  const q = esc(QUERY).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return safe.replace(new RegExp(q, "gi"), m=>`<mark>${m}</mark>`);
+}
+
+function renderRecent(){
+  const rows = (DATA.recent||[]).filter(r=>TAB==="__ALL__"||r.machine===TAB);
+  const el = document.getElementById("recent");
+  if(!rows.length){ el.innerHTML='<div class="empty">Aucune activite recente.</div>'; return; }
+  let h = `<table><thead><tr><th>Heure (UTC)</th><th>Machine</th><th class="user">Utilisateur</th>
+    <th class="ip">IP</th>
+    <th>Evenement</th><th>Modele</th><th class="num">Tokens</th>
+    <th class="num">Cout</th><th>Outil</th></tr></thead><tbody>`;
+  for(const r of rows.slice(0,40)){
+    let dec = "";
+    if(r.decision){ const acc = r.decision.toLowerCase().startsWith("acc");
+      dec = ` <span class="pill ${acc?"acc":"rej"}">${esc(r.decision)}</span>`; }
+    h += `<tr><td class="time">${esc(r.time)}</td><td>${esc(r.machine)}</td>
+      <td class="user">${esc(r.user||"—")}</td>
+      <td class="ip">${esc(r.ip||"—")}</td><td>${esc(r.event)}</td>
+      <td>${esc(r.model)}</td><td class="num">${fmt(r.tokens)}</td>
+      <td class="num">${r.cost_usd?usd(r.cost_usd):""}</td>
+      <td>${esc(r.tool)}${dec}</td></tr>`;
+  }
+  el.innerHTML = h + "</tbody></table>";
+}
+
+function esc(s){ return String(s==null?"":s).replace(/[&<>"]/g,
+  c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
+
+document.querySelectorAll(".range button").forEach(b=>b.onclick=()=>{
+  document.querySelectorAll(".range button").forEach(x=>x.classList.remove("active"));
+  b.classList.add("active"); DAYS = parseInt(b.dataset.days); load();
+});
+
+document.getElementById("promptSearch").addEventListener("input", e=>{
+  QUERY = e.target.value.trim();
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(loadPrompts, 250);  // anti-rebond
+});
+
+load();
+setInterval(load, 30000); // rafraichissement auto toutes les 30 s
+</script>
+</body>
+</html>
