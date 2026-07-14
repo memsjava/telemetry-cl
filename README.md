@@ -278,6 +278,12 @@ Les tableaux **Prompts** et **Activité récente** sont paginés (20 lignes par
 page, boutons Précédent/Suivant) — la recherche et les filtres s'appliquent à
 l'ensemble, pas seulement à la page affichée.
 
+Une **barre de filtres** (utilisateur, DP, compte) au-dessus des cartes
+restreint les prompts, l'activité récente, le tableau des machines et
+l'export ; les filtres s'appliquent côté serveur, donc sur la totalité des
+données. Le tableau **Machines** se trie en cliquant sur les en-têtes de
+colonnes (coût, tokens, sessions, dernière activité...).
+
 Le panneau **Export** télécharge les événements d'un utilisateur (ou de tous)
 sur la période affichée, en **CSV** (UTF-8 + point-virgule, s'ouvre
 directement dans Excel) ou en **XLS** : horodatage, machine, IP, utilisateur,

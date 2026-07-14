@@ -452,11 +452,11 @@ class TestActivite(ServerTestCase):
         super().setUp()
         server.ingest_logs(logs_payload("pc-a", [
             log_record("api_request", NOW_MS + i, model="m") for i in range(5)
-        ], user="alice"), ip="192.168.1.10")
+        ], user="alice", dp="jean", compte="GroupeAI1"), ip="192.168.1.10")
         server.ingest_logs(logs_payload("pc-b", [
             log_record("tool_decision", NOW_MS + 100, tool_name="Bash",
                        decision="accept"),
-        ], user="bob"), ip="192.168.1.11")
+        ], user="bob", dp="marie", compte="GroupeAI2"), ip="192.168.1.11")
 
     def test_carries_machine_ip_and_user(self):
         got = server.get_activite()
@@ -484,6 +484,16 @@ class TestActivite(ServerTestCase):
         self.assertEqual(got["count"], 5)
         self.assertTrue(all(r["user"] == "alice" for r in got["activite"]))
 
+    def test_filter_by_dp_and_by_compte(self):
+        self.assertEqual(server.get_activite(dp="jean")["count"], 5)
+        self.assertEqual(server.get_activite(compte="GroupeAI2")["count"], 1)
+        # les filtres se combinent en ET
+        self.assertEqual(server.get_activite(dp="jean", compte="GroupeAI2")["count"], 0)
+
+    def test_rows_carry_dp_and_compte(self):
+        row = server.get_activite(machine="pc-b")["activite"][0]
+        self.assertEqual((row["dp"], row["compte"]), ("marie", "GroupeAI2"))
+
     def test_offset_beyond_the_end_gives_an_empty_page(self):
         got = server.get_activite(limit=20, offset=40)
         self.assertEqual(got["count"], 6)
@@ -502,12 +512,12 @@ class TestPrompts(ServerTestCase):
                        prompt_length=23, **{"session.id": "s-1"}),
             log_record("user_prompt", NOW_MS + 1000, prompt="ajoute des tests",
                        prompt_length=16, **{"session.id": "s-1"}),
-        ], user="alice"), ip="192.168.1.10")
+        ], user="alice", dp="jean", compte="GroupeAI1"), ip="192.168.1.10")
         server.ingest_logs(logs_payload("pc-b", [
             log_record("user_prompt", NOW_MS + 2000, prompt="deploie en prod",
                        prompt_length=15, **{"session.id": "s-2"}),
             log_record("api_request", NOW_MS + 3000, model="m"),  # sans prompt
-        ], user="bob"), ip="192.168.1.11")
+        ], user="bob", dp="marie", compte="GroupeAI2"), ip="192.168.1.11")
 
     def test_returns_only_records_that_carry_prompt_text(self):
         res = server.get_prompts()
@@ -540,6 +550,15 @@ class TestPrompts(ServerTestCase):
     def test_filter_by_user_and_machine_combine(self):
         self.assertEqual(server.get_prompts(user="alice", machine="pc-b")["count"], 0)
         self.assertEqual(server.get_prompts(user="bob", machine="pc-b")["count"], 1)
+
+    def test_filter_by_dp_and_by_compte(self):
+        self.assertEqual(server.get_prompts(dp="jean")["count"], 2)
+        self.assertEqual(server.get_prompts(compte="GroupeAI2")["count"], 1)
+        self.assertEqual(server.get_prompts(dp="jean", query="prod")["count"], 0)
+
+    def test_prompt_rows_carry_dp_and_compte(self):
+        p = server.get_prompts(machine="pc-a")["prompts"][0]
+        self.assertEqual((p["dp"], p["compte"]), ("jean", "GroupeAI1"))
 
     def test_search(self):
         res = server.get_prompts(query="bug")
@@ -831,6 +850,27 @@ class TestHttpEndpoints(HttpTestCase):
         self.assertEqual(body["count"], 3)
         self.assertEqual([p["text"] for p in body["prompts"]], ["p0"])
 
+    def test_dp_and_compte_query_params_filter_the_apis(self):
+        self.post("/v1/logs", logs_payload("pc-a", [
+            log_record("user_prompt", NOW_MS, prompt="prompt de jean"),
+        ], user="alice", dp="jean", compte="GroupeAI1"))
+        self.post("/v1/logs", logs_payload("pc-b", [
+            log_record("user_prompt", NOW_MS, prompt="prompt de marie"),
+        ], user="bob", dp="marie", compte="GroupeAI2"))
+
+        _, activite = self.get("/api/activite?dp=jean")
+        self.assertEqual(activite["count"], 1)
+        self.assertEqual(activite["activite"][0]["user"], "alice")
+
+        _, prompts = self.get("/api/prompts?compte=GroupeAI2")
+        self.assertEqual(prompts["count"], 1)
+        self.assertEqual(prompts["prompts"][0]["text"], "prompt de marie")
+
+        _, _, body = self.request("/api/export?dp=marie")
+        text = body.decode("utf-8")
+        self.assertIn("bob", text)
+        self.assertNotIn("alice", text)
+
     def test_export_csv_downloads_as_attachment(self):
         self.post("/v1/logs", logs_payload("pc-a", [
             log_record("api_request", NOW_MS, model="m", input_tokens=10,
@@ -908,6 +948,17 @@ class TestExportFormats(ServerTestCase):
         self.assertEqual(len(rows), 2)
         self.assertEqual(rows[0][-1], "recent")
         self.assertEqual(rows[0][3], "eric")
+
+    def test_get_export_rows_filters_by_dp_and_compte(self):
+        server.ingest_logs(logs_payload("pc-a", [
+            log_record("api_request", NOW_MS, model="m"),
+        ], user="eric", dp="jean", compte="GroupeAI1"), ip="10.0.0.1")
+        server.ingest_logs(logs_payload("pc-b", [
+            log_record("api_request", NOW_MS, model="m"),
+        ], user="bob", dp="marie", compte="GroupeAI2"), ip="10.0.0.2")
+        self.assertEqual(len(server.get_export_rows(dp="jean")), 1)
+        self.assertEqual(server.get_export_rows(compte="GroupeAI2")[0][3], "bob")
+        self.assertEqual(server.get_export_rows(dp="jean", compte="GroupeAI2"), [])
 
 
 class TestSessions(unittest.TestCase):

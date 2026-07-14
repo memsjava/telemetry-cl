@@ -67,6 +67,9 @@
   .pager button{background:var(--panel2);color:var(--text);border:1px solid var(--line);
     padding:5px 12px;border-radius:8px;cursor:pointer;font-size:13px}
   .pager button:disabled{opacity:.35;cursor:default}
+  .filtres{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:20px}
+  th.tri{cursor:pointer;user-select:none;white-space:nowrap}
+  th.tri:hover{color:var(--text)}
   .prompt-text{white-space:pre-wrap;word-break:break-word;line-height:1.45;
     max-width:640px;cursor:pointer}
   .prompt-text.clamped{display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;
@@ -90,6 +93,13 @@
 </header>
 <main>
   <div class="tabs" id="tabs"></div>
+  <div class="filtres">
+    <span class="muted">Filtres :</span>
+    <select id="fUser"><option value="">Utilisateur : tous</option></select>
+    <select id="fDp"><option value="">DP : tous</option></select>
+    <select id="fCompte"><option value="">Compte : tous</option></select>
+    <button class="btn" id="fReset">Reinitialiser</button>
+  </div>
   <div class="cards" id="cards"></div>
 
   <div class="panel" id="machinesPanel">
@@ -126,7 +136,6 @@
     <h2>
       Export
       <span class="grow"></span>
-      <select id="exportUser"><option value="">(tous les utilisateurs)</option></select>
       <select id="exportFormat">
         <option value="csv">CSV (Excel)</option>
         <option value="xls">XLS</option>
@@ -134,7 +143,7 @@
       <button class="btn accent" id="exportBtn">Telecharger</button>
     </h2>
     <div class="muted">Exporte les evenements (tokens, couts, outils, prompts...)
-      de l'utilisateur choisi sur la periode affichee
+      de la periode affichee, en respectant les filtres actifs
       <span id="exportScope"></span>.</div>
   </div>
 </main>
@@ -145,6 +154,8 @@ let PROMPTS = [], QUERY = "", searchTimer = null;
 let ACTIVITE = [];
 let PPAGE = 0, PTOTAL = 0, APAGE = 0, ATOTAL = 0;
 const PAGE_SIZE = 20;
+const FILTERS = {user: "", dp: "", compte: ""};
+let SORT = {key: "cost_usd", dir: -1};
 
 const palette = ["#d97757","#6ea8fe","#5cc98a","#e5c07b","#c678dd","#56b6c2","#e5776b","#98c379"];
 const fmt = n => (n||0).toLocaleString("fr-FR");
@@ -156,17 +167,24 @@ async function fetchJson(url){
   return r.json();
 }
 
+function filterParams(p){
+  if(TAB !== "__ALL__") p.set("machine", TAB);
+  for(const [k,v] of Object.entries(FILTERS)) if(v) p.set(k, v);
+  return p;
+}
+
 async function load(){
   DATA = await fetchJson("/api/stats?days=" + DAYS);
   document.getElementById("updated").textContent = "Mis a jour : " + DATA.generated_at;
+  renderFiltres();
   renderTabs(); render(); renderExport();
   loadPrompts();
   loadActivite();
 }
 
 async function loadPrompts(){
-  const p = new URLSearchParams({days: DAYS, limit: PAGE_SIZE, offset: PPAGE*PAGE_SIZE});
-  if(TAB !== "__ALL__") p.set("machine", TAB);
+  const p = filterParams(new URLSearchParams(
+    {days: DAYS, limit: PAGE_SIZE, offset: PPAGE*PAGE_SIZE}));
   if(QUERY) p.set("q", QUERY);
   const body = await fetchJson("/api/prompts?" + p);
   PROMPTS = body.prompts || []; PTOTAL = body.count || 0;
@@ -174,11 +192,36 @@ async function loadPrompts(){
 }
 
 async function loadActivite(){
-  const p = new URLSearchParams({days: DAYS, limit: PAGE_SIZE, offset: APAGE*PAGE_SIZE});
-  if(TAB !== "__ALL__") p.set("machine", TAB);
+  const p = filterParams(new URLSearchParams(
+    {days: DAYS, limit: PAGE_SIZE, offset: APAGE*PAGE_SIZE}));
   const body = await fetchJson("/api/activite?" + p);
   ACTIVITE = body.activite || []; ATOTAL = body.count || 0;
   renderRecent();
+}
+
+function renderFiltres(){
+  const listes = {
+    fUser:   [...new Set(DATA.machines.flatMap(m=>m.users||[]))].sort(),
+    fDp:     [...new Set(DATA.machines.flatMap(m=>m.dps||[]))].sort(),
+    fCompte: [...new Set(DATA.machines.flatMap(m=>m.comptes||[]))].sort(),
+  };
+  const libelles = {fUser: "Utilisateur", fDp: "DP", fCompte: "Compte"};
+  const cles = {fUser: "user", fDp: "dp", fCompte: "compte"};
+  for(const [id, valeurs] of Object.entries(listes)){
+    const sel = document.getElementById(id);
+    const avant = FILTERS[cles[id]];
+    sel.innerHTML = `<option value="">${libelles[id]} : tous</option>`
+      + valeurs.map(v=>`<option value="${esc(v)}">${esc(v)}</option>`).join("");
+    if(valeurs.includes(avant)) sel.value = avant;
+  }
+}
+
+function appliquerFiltres(){
+  FILTERS.user = document.getElementById("fUser").value;
+  FILTERS.dp = document.getElementById("fDp").value;
+  FILTERS.compte = document.getElementById("fCompte").value;
+  PPAGE = 0; APAGE = 0;
+  renderMachines(); renderExport(); loadPrompts(); loadActivite();
 }
 
 function changerPagePrompts(delta){ PPAGE = Math.max(0, PPAGE + delta); loadPrompts(); }
@@ -250,21 +293,60 @@ function render(){
   renderModels(d);
 }
 
+function machinesFiltrees(){
+  return DATA.machines.filter(m=>
+    (!FILTERS.user || (m.users||[]).includes(FILTERS.user)) &&
+    (!FILTERS.dp || (m.dps||[]).includes(FILTERS.dp)) &&
+    (!FILTERS.compte || (m.comptes||[]).includes(FILTERS.compte)));
+}
+
+const SORT_VALUES = {
+  machine: m=>m.machine.toLowerCase(),
+  user: m=>(m.user||"").toLowerCase(),
+  dp: m=>(m.dp||"").toLowerCase(),
+  compte: m=>(m.compte||"").toLowerCase(),
+  cost_usd: m=>m.cost_usd,
+  tokens: m=>m.tokens.total,
+  sessions: m=>m.sessions,
+  prompts: m=>m.prompts,
+  last_ms: m=>m.last_ms||0,
+};
+
+function trierMachines(key){
+  SORT = {key, dir: SORT.key===key ? -SORT.dir : -1};
+  renderMachines();
+}
+
 function renderMachines(){
   const panel = document.getElementById("machinesPanel");
   panel.style.display = TAB==="__ALL__" ? "" : "none";
   if(TAB!=="__ALL__") return;
 
   const el = document.getElementById("machines");
-  if(!DATA.machines.length){
-    el.innerHTML='<div class="empty">Aucune machine n\'a encore envoye de donnees.</div>'; return; }
+  const rows = machinesFiltrees();
+  if(!rows.length){
+    el.innerHTML = `<div class="empty">${DATA.machines.length
+      ? "Aucune machine ne correspond aux filtres."
+      : "Aucune machine n'a encore envoye de donnees."}</div>`;
+    return;
+  }
 
-  let h = `<table><thead><tr><th>Machine</th><th class="user">Utilisateur</th>
-    <th class="user">DP</th><th class="user">Compte</th>
+  const val = SORT_VALUES[SORT.key] || SORT_VALUES.cost_usd;
+  rows.sort((a,b)=>{
+    const x = val(a), y = val(b);
+    return (x<y ? -1 : x>y ? 1 : 0) * SORT.dir;
+  });
+
+  const th = (key, label, cls)=>{
+    const fleche = SORT.key===key ? (SORT.dir>0 ? " ▲" : " ▼") : "";
+    return `<th class="tri ${cls||""}" data-tri="${key}">${label}${fleche}</th>`;
+  };
+  let h = `<table><thead><tr>${th("machine","Machine")}${th("user","Utilisateur","user")}
+    ${th("dp","DP","user")}${th("compte","Compte","user")}
     <th class="ip">Adresse IP</th>
-    <th class="num">Cout</th><th class="num">Tokens</th><th class="num">Sessions</th>
-    <th class="num">Prompts</th><th>Derniere activite (UTC)</th></tr></thead><tbody>`;
-  for(const m of DATA.machines){
+    ${th("cost_usd","Cout","num")}${th("tokens","Tokens","num")}${th("sessions","Sessions","num")}
+    ${th("prompts","Prompts","num")}${th("last_ms","Derniere activite (UTC)")}</tr></thead><tbody>`;
+  for(const m of rows){
     const listCell = (list)=> list.length ? esc(list[0]) + (list.length>1
       ? ` <span class="muted">+${list.length-1}</span>` : "") : "—";
     h += `<tr><td>${esc(m.machine)}</td><td class="user">${listCell(m.users||[])}</td>
@@ -276,6 +358,7 @@ function renderMachines(){
       <td class="time">${m.last_ms? esc(tsFmt(m.last_ms)) : "—"}</td></tr>`;
   }
   el.innerHTML = h + "</tbody></table>";
+  el.querySelectorAll("th.tri").forEach(t=>t.onclick=()=>trierMachines(t.dataset.tri));
 }
 
 function tsFmt(ms){
@@ -366,11 +449,12 @@ function renderPrompts(){
   }
 
   let h = `<table><thead><tr><th>Heure (UTC)</th><th>Machine</th><th class="user">Utilisateur</th>
-    <th class="ip">IP</th>
+    <th class="user">DP</th><th class="ip">IP</th>
     <th>Prompt</th><th class="num">Car.</th></tr></thead><tbody>`;
   for(const p of PROMPTS){
     h += `<tr><td class="time">${esc(p.time)}</td><td>${esc(p.machine)}</td>
       <td class="user">${esc(p.user||"—")}</td>
+      <td class="user">${esc(p.dp||"—")}</td>
       <td class="ip">${esc(p.ip||"—")}</td>
       <td><div class="prompt-text clamped" title="Cliquer pour deplier">${highlight(p.text)}</div></td>
       <td class="num">${fmt(p.length)}</td></tr>`;
@@ -396,7 +480,7 @@ function renderRecent(){
     return;
   }
   let h = `<table><thead><tr><th>Heure (UTC)</th><th>Machine</th><th class="user">Utilisateur</th>
-    <th class="ip">IP</th>
+    <th class="user">DP</th><th class="ip">IP</th>
     <th>Evenement</th><th>Modele</th><th class="num">Tokens</th>
     <th class="num">Cout</th><th>Outil</th></tr></thead><tbody>`;
   for(const r of ACTIVITE){
@@ -405,6 +489,7 @@ function renderRecent(){
       dec = ` <span class="pill ${acc?"acc":"rej"}">${esc(r.decision)}</span>`; }
     h += `<tr><td class="time">${esc(r.time)}</td><td>${esc(r.machine)}</td>
       <td class="user">${esc(r.user||"—")}</td>
+      <td class="user">${esc(r.dp||"—")}</td>
       <td class="ip">${esc(r.ip||"—")}</td><td>${esc(r.event)}</td>
       <td>${esc(r.model)}</td><td class="num">${fmt(r.tokens)}</td>
       <td class="num">${r.cost_usd?usd(r.cost_usd):""}</td>
@@ -414,14 +499,13 @@ function renderRecent(){
 }
 
 function renderExport(){
-  const sel = document.getElementById("exportUser");
-  const avant = sel.value;
-  const users = [...new Set(DATA.machines.flatMap(m=>m.users||[]))].sort();
-  sel.innerHTML = '<option value="">(tous les utilisateurs)</option>'
-    + users.map(u=>`<option value="${esc(u)}">${esc(u)}</option>`).join("");
-  if(users.includes(avant)) sel.value = avant;
+  const actifs = [];
+  if(TAB!=="__ALL__") actifs.push(`machine ${TAB}`);
+  if(FILTERS.user) actifs.push(`utilisateur ${FILTERS.user}`);
+  if(FILTERS.dp) actifs.push(`DP ${FILTERS.dp}`);
+  if(FILTERS.compte) actifs.push(`compte ${FILTERS.compte}`);
   document.getElementById("exportScope").textContent =
-    TAB==="__ALL__" ? "(toutes machines)" : `(machine ${TAB})`;
+    actifs.length ? `(${actifs.join(", ")})` : "(aucun filtre : tout)";
 }
 
 function esc(s){ return String(s==null?"":s).replace(/[&<>"]/g,
@@ -441,12 +525,16 @@ document.getElementById("promptSearch").addEventListener("input", e=>{
 });
 
 document.getElementById("exportBtn").onclick = ()=>{
-  const p = new URLSearchParams({days: DAYS,
-    format: document.getElementById("exportFormat").value});
-  const user = document.getElementById("exportUser").value;
-  if(user) p.set("user", user);
-  if(TAB !== "__ALL__") p.set("machine", TAB);
+  const p = filterParams(new URLSearchParams({days: DAYS,
+    format: document.getElementById("exportFormat").value}));
   location.href = "/api/export?" + p;  // Content-Disposition: attachment
+};
+
+for(const id of ["fUser","fDp","fCompte"])
+  document.getElementById(id).addEventListener("change", appliquerFiltres);
+document.getElementById("fReset").onclick = ()=>{
+  for(const id of ["fUser","fDp","fCompte"]) document.getElementById(id).value = "";
+  appliquerFiltres();
 };
 
 load();

@@ -595,7 +595,20 @@ def _clamp_limit(limit, default=20):
     return max(1, min(int(limit), 1000))
 
 
-def get_activite(days=0, machine="", user="", limit=20, offset=0):
+def _identity_filters(machine="", user="", dp="", compte=""):
+    """Clauses WHERE communes aux vues filtrables (activite, prompts, export)."""
+    where = []
+    params = []
+    for col, val in (("machine", machine), ("user", user),
+                     ("dp", dp), ("compte", compte)):
+        if val:
+            where.append(f"{col}=?")
+            params.append(val)
+    return where, params
+
+
+def get_activite(days=0, machine="", user="", dp="", compte="",
+                 limit=20, offset=0):
     """Flux d'activite pagine (l'onglet "Activite recente" du tableau de bord).
 
     Sorti de get_stats pour ne pas rejouer tout le flux a chaque poll de 30 s
@@ -605,14 +618,9 @@ def get_activite(days=0, machine="", user="", limit=20, offset=0):
     limit = _clamp_limit(limit)
     offset = max(0, int(offset or 0))
 
-    where = ["ts_ms>=?"]
-    params = [cutoff]
-    if machine:
-        where.append("machine=?")
-        params.append(machine)
-    if user:
-        where.append("user=?")
-        params.append(user)
+    where, params = _identity_filters(machine, user, dp, compte)
+    where.insert(0, "ts_ms>=?")
+    params.insert(0, cutoff)
     clause = " AND ".join(where)
 
     with _db_lock:
@@ -620,7 +628,7 @@ def get_activite(days=0, machine="", user="", limit=20, offset=0):
             f"SELECT COUNT(*) FROM events WHERE {clause}", params).fetchone()
         rows = _conn.execute(
             f"""
-            SELECT ts_ms, machine, ip, user, name, model, cost_usd,
+            SELECT ts_ms, machine, ip, user, dp, compte, name, model, cost_usd,
                    input_tokens, output_tokens, tool_name, decision
             FROM events WHERE {clause} ORDER BY ts_ms DESC LIMIT ? OFFSET ?
             """,
@@ -633,12 +641,14 @@ def get_activite(days=0, machine="", user="", limit=20, offset=0):
             "machine": r[1],
             "ip": r[2] or "",
             "user": r[3] or "",
-            "event": r[4],
-            "model": r[5] or "",
-            "cost_usd": round(float(r[6] or 0), 4),
-            "tokens": int((r[7] or 0) + (r[8] or 0)),
-            "tool": r[9] or "",
-            "decision": r[10] or "",
+            "dp": r[4] or "",
+            "compte": r[5] or "",
+            "event": r[6],
+            "model": r[7] or "",
+            "cost_usd": round(float(r[8] or 0), 4),
+            "tokens": int((r[9] or 0) + (r[10] or 0)),
+            "tool": r[11] or "",
+            "decision": r[12] or "",
         }
         for r in rows
     ]
@@ -650,7 +660,8 @@ def _fmt_ts(ms):
     return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
 
-def get_prompts(days=0, machine="", user="", query="", limit=200, offset=0):
+def get_prompts(days=0, machine="", user="", dp="", compte="",
+                query="", limit=200, offset=0):
     """Journal des prompts saisis (necessite OTEL_LOG_USER_PROMPTS=1 cote machine).
 
     Pagine : `count` est le total correspondant aux filtres, pas la taille de
@@ -660,14 +671,9 @@ def get_prompts(days=0, machine="", user="", query="", limit=200, offset=0):
     limit = _clamp_limit(limit, default=200)
     offset = max(0, int(offset or 0))
 
-    where = ["prompt<>''", "ts_ms>=?"]
-    params = [cutoff]
-    if machine:
-        where.append("machine=?")
-        params.append(machine)
-    if user:
-        where.append("user=?")
-        params.append(user)
+    where, params = _identity_filters(machine, user, dp, compte)
+    where[:0] = ["prompt<>''", "ts_ms>=?"]
+    params.insert(0, cutoff)
     if query:
         # La recherche est litterale : on neutralise les jokers LIKE (% et _).
         escaped = (query.replace("\\", "\\\\")
@@ -681,7 +687,8 @@ def get_prompts(days=0, machine="", user="", query="", limit=200, offset=0):
         (total,) = _conn.execute(
             f"SELECT COUNT(*) FROM events WHERE {clause}", params).fetchone()
         rows = _conn.execute(
-            f"SELECT ts_ms, machine, ip, user, session_id, model, prompt, prompt_length"
+            f"SELECT ts_ms, machine, ip, user, dp, compte, session_id, model,"
+            f" prompt, prompt_length"
             f" FROM events WHERE {clause} ORDER BY ts_ms DESC LIMIT ? OFFSET ?",
             params + [limit, offset],
         ).fetchall()
@@ -692,10 +699,12 @@ def get_prompts(days=0, machine="", user="", query="", limit=200, offset=0):
             "machine": r[1],
             "ip": r[2] or "",
             "user": r[3] or "",
-            "session_id": r[4] or "",
-            "model": r[5] or "",
-            "text": r[6] or "",
-            "length": int(r[7] or 0),
+            "dp": r[4] or "",
+            "compte": r[5] or "",
+            "session_id": r[6] or "",
+            "model": r[7] or "",
+            "text": r[8] or "",
+            "length": int(r[9] or 0),
         }
         for r in rows
     ]
@@ -712,17 +721,12 @@ EXPORT_HEADERS = ("heure_utc", "machine", "ip", "utilisateur", "dp", "compte",
                   "cout_usd", "outil", "decision", "prompt")
 
 
-def get_export_rows(days=0, user="", machine=""):
+def get_export_rows(days=0, user="", machine="", dp="", compte=""):
     """Evenements bruts d'un utilisateur (ou de tous), du plus recent au plus ancien."""
     cutoff = _cutoff_ms(days)
-    where = ["ts_ms>=?"]
-    params = [cutoff]
-    if user:
-        where.append("user=?")
-        params.append(user)
-    if machine:
-        where.append("machine=?")
-        params.append(machine)
+    where, params = _identity_filters(machine, user, dp, compte)
+    where.insert(0, "ts_ms>=?")
+    params.insert(0, cutoff)
 
     with _db_lock:
         rows = _conn.execute(
@@ -1016,6 +1020,8 @@ class Handler(BaseHTTPRequestHandler):
                 days=qs_int("days"),
                 machine=qs_str("machine"),
                 user=qs_str("user"),
+                dp=qs_str("dp"),
+                compte=qs_str("compte"),
                 query=qs_str("q"),
                 limit=qs_int("limit", 200),
                 offset=qs_int("offset", 0),
@@ -1027,6 +1033,8 @@ class Handler(BaseHTTPRequestHandler):
                 days=qs_int("days"),
                 machine=qs_str("machine"),
                 user=qs_str("user"),
+                dp=qs_str("dp"),
+                compte=qs_str("compte"),
                 limit=qs_int("limit", 20),
                 offset=qs_int("offset", 0),
             ))
@@ -1039,7 +1047,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(400, b'{"error":"format inconnu (csv ou xls)"}')
                 return
             rows = get_export_rows(days=qs_int("days"), user=user,
-                                   machine=qs_str("machine"))
+                                   machine=qs_str("machine"),
+                                   dp=qs_str("dp"), compte=qs_str("compte"))
             days = qs_int("days")
             stem = (f"moniteur_{user or 'tous'}_"
                     f"{f'{days}j' if days else 'tout'}")

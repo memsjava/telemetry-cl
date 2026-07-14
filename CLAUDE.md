@@ -16,7 +16,7 @@ tracked machine just points OTLP at this collector; there is no auth token to ma
 python server.py                        # listens on 0.0.0.0:4318
 python server.py --port 4319 --host 127.0.0.1
 
-python -m unittest discover -p "test_*.py"             # full suite (161 tests), run from repo root
+python -m unittest discover -p "test_*.py"             # full suite (167 tests), run from repo root
 python -m unittest tests.test_server.TestPrompts -v            # one class
 python -m unittest tests.test_server.TestPrompts.test_search   # one test
 ```
@@ -133,13 +133,16 @@ Everything funnels through **one Python file**, `server.py`, split into clear st
    then folded into `totals` in the finalization loop at the bottom (which also has to `.pop()` any new
    machine-only key).
 
-   `get_prompts` backs `GET /api/prompts?days=&machine=&q=&limit=&offset=` — the prompt log, kept out of
-   `/api/stats` so the dashboard's 30 s poll doesn't ship every prompt body each time. It is paginated:
-   `count` in the response is the filtered TOTAL, not the page size. Its `q` search escapes `%`/`_` so LIKE
-   metacharacters stay literal. `get_activite` backs `GET /api/activite?days=&machine=&user=&limit=&offset=`,
-   the paginated activity feed — it used to live inside `get_stats` as a `recent` key; don't re-add it there.
-   `get_export_rows` + `export_csv`/`export_xls` back `GET /api/export?user=&days=&format=csv|xls` (CSV =
-   UTF-8 BOM + `;` separator for French Excel; XLS = Excel 2003 SpreadsheetML — both stdlib-only on purpose).
+   `get_prompts` backs `GET /api/prompts?days=&machine=&user=&dp=&compte=&q=&limit=&offset=` — the prompt
+   log, kept out of `/api/stats` so the dashboard's 30 s poll doesn't ship every prompt body each time. It is
+   paginated: `count` in the response is the filtered TOTAL, not the page size. Its `q` search escapes `%`/`_`
+   so LIKE metacharacters stay literal. `get_activite` backs `GET /api/activite` (same filter params minus
+   `q`), the paginated activity feed — it used to live inside `get_stats` as a `recent` key; don't re-add it
+   there. `get_export_rows` + `export_csv`/`export_xls` back `GET /api/export?user=&dp=&compte=&machine=&days=
+   &format=csv|xls` (CSV = UTF-8 BOM + `;` separator for French Excel; XLS = Excel 2003 SpreadsheetML — both
+   stdlib-only on purpose). The shared `machine`/`user`/`dp`/`compte` WHERE-building lives in
+   `_identity_filters` — extend that, not each function, to add a filterable column; the dashboard's filter
+   bar (selects above the cards) drives these params and also client-side-filters the machines table.
 
 3. **HTTP layer** (`Handler(BaseHTTPRequestHandler)` + `ThreadingHTTPServer`) — stdlib `http.server`, no
    framework. Routes are hand-dispatched by exact path string in `do_GET`/`do_POST`. `web/dashboard.html` is
