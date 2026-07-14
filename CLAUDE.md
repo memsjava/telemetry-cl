@@ -16,7 +16,7 @@ tracked machine just points OTLP at this collector; there is no auth token to ma
 python server.py                        # listens on 0.0.0.0:4318
 python server.py --port 4319 --host 127.0.0.1
 
-python -m unittest discover -p "test_*.py"             # full suite (97 tests), run from repo root
+python -m unittest discover -p "test_*.py"             # full suite (161 tests), run from repo root
 python -m unittest tests.test_server.TestPrompts -v            # one class
 python -m unittest tests.test_server.TestPrompts.test_search   # one test
 ```
@@ -36,7 +36,7 @@ in `tests/` (plural, with `__init__.py`), Node's in `test/` (singular, no packag
 ecosystem's own convention rather than picking one name for both.
 
 ```bash
-node --test                              # Node suite (33 tests) — auto-discovers test/*.test.js
+node --test                              # Node suite (52 tests) — auto-discovers test/*.test.js
 ```
 
 There is no linter or CI config. The repo lives at `git@github.com:memsjava/telemetry-cl.git` — confirm with the
@@ -126,21 +126,33 @@ Everything funnels through **one Python file**, `server.py`, split into clear st
 2. **Aggregation** (`get_stats`) — the single function backing `GET /api/stats?days=N`. It queries `events` and
    `metrics` independently and merges results into a per-machine dict (plus a synthesized `__TOTAL__` row
    summed across machines), covering: token/cost totals, tool accept/reject counts, per-model breakdown,
-   commits/PRs/LOC, IPs and OS users seen per machine (both `ip`/`user` = most recent, `ips`/`users` = full
-   list — same pattern, copy one to add the other), a daily cost/token timeline, and a recent-activity feed
-   (last 60 events). If you add a new stat, it almost certainly belongs as another `cur.execute(...)` block
-   here, following the existing `machine → accumulate into machines[name]` pattern, then folded into `totals`
-   in the finalization loop at the bottom (which also has to `.pop()` any new machine-only key).
+   commits/PRs/LOC, and the per-machine identity fields `ip`/`user`/`dp`/`compte` (single value = most recent,
+   `ips`/`users`/`dps`/`comptes` = full list — one generalized loop covers all four columns; add a fifth there),
+   plus a daily cost/token timeline. If you add a new stat, it almost certainly belongs as another
+   `cur.execute(...)` block here, following the existing `machine → accumulate into machines[name]` pattern,
+   then folded into `totals` in the finalization loop at the bottom (which also has to `.pop()` any new
+   machine-only key).
 
-   `get_prompts` backs `GET /api/prompts?days=&machine=&q=&limit=` — the prompt log, kept out of `/api/stats`
-   so the dashboard's 30 s poll doesn't ship every prompt body each time. Its `q` search escapes `%`/`_` so
-   LIKE metacharacters stay literal.
+   `get_prompts` backs `GET /api/prompts?days=&machine=&q=&limit=&offset=` — the prompt log, kept out of
+   `/api/stats` so the dashboard's 30 s poll doesn't ship every prompt body each time. It is paginated:
+   `count` in the response is the filtered TOTAL, not the page size. Its `q` search escapes `%`/`_` so LIKE
+   metacharacters stay literal. `get_activite` backs `GET /api/activite?days=&machine=&user=&limit=&offset=`,
+   the paginated activity feed — it used to live inside `get_stats` as a `recent` key; don't re-add it there.
+   `get_export_rows` + `export_csv`/`export_xls` back `GET /api/export?user=&days=&format=csv|xls` (CSV =
+   UTF-8 BOM + `;` separator for French Excel; XLS = Excel 2003 SpreadsheetML — both stdlib-only on purpose).
 
 3. **HTTP layer** (`Handler(BaseHTTPRequestHandler)` + `ThreadingHTTPServer`) — stdlib `http.server`, no
    framework. Routes are hand-dispatched by exact path string in `do_GET`/`do_POST`. `web/dashboard.html` is
    served as a static file at `/` and `/index.html` (path in `DASHBOARD_PATH`); it's a single-file vanilla-JS +
    Chart.js (via CDN) frontend that polls `/api/stats` and renders cards/tables/charts entirely client-side —
-   there's no server-side templating.
+   there's no server-side templating. `web/login.html` is served at `/login` the same way.
+
+   **Auth is optional and dashboard-only**: `--mot-de-passe` (or env `MONITEUR_MOT_DE_PASSE`) sets
+   `AUTH_PASSWORD`; when set, `/`, `/api/*` require a session cookie (`moniteur_session`, in-memory token store
+   `_sessions`, 7-day TTL — a restart logs everyone out) obtained via POST `/login`. When unset (the default),
+   everything stays open — that's why the whole existing test suite runs without auth plumbing. `/v1/*`
+   ingestion and `/health` are NEVER protected: tracked machines post without credentials, by design — do not
+   add auth checks to `do_POST`'s OTLP branch.
 
 All DB access goes through one shared `sqlite3` connection (`_conn`) guarded by a single `threading.Lock`
 (`_db_lock`), since `ThreadingHTTPServer` handles requests concurrently on separate threads. Keep any new

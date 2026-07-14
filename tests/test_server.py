@@ -15,6 +15,7 @@ import sqlite3
 import tempfile
 import threading
 import unittest
+import urllib.error
 import urllib.request
 from http.server import ThreadingHTTPServer
 from pathlib import Path
@@ -423,17 +424,10 @@ class TestStats(ServerTestCase):
         self.assertEqual(list(models_a), ["claude-sonnet-5"])
         self.assertEqual(models_a["claude-sonnet-5"]["cost_usd"], 0.50)
 
-    def test_recent_feed_carries_machine_and_ip(self):
-        recent = server.get_stats()["recent"]
-        self.assertTrue(recent)
-        self.assertTrue(all(r["ip"] for r in recent))
-        self.assertEqual({r["machine"] for r in recent}, {"pc-a", "pc-b"})
-
-    def test_recent_feed_carries_the_os_user(self):
-        recent = server.get_stats()["recent"]
-        by_machine = {r["machine"]: r["user"] for r in recent}
-        self.assertEqual(by_machine["pc-a"], "alice")
-        self.assertEqual(by_machine["pc-b"], "bob")
+    def test_stats_no_longer_embed_the_activity_feed(self):
+        # L'activite est servie paginee par /api/activite : le poll de 30 s
+        # du tableau de bord ne doit plus transporter tout le flux.
+        self.assertNotIn("recent", server.get_stats())
 
     def test_days_filter_excludes_old_rows(self):
         # NOW_MS est loin dans le passe : une fenetre de 1 jour ne doit rien voir.
@@ -449,6 +443,55 @@ class TestStats(ServerTestCase):
         ]), ip="10.0.0.9")
         pc_c = next(m for m in server.get_stats()["machines"] if m["machine"] == "pc-c")
         self.assertEqual(pc_c["sessions"], 2)
+
+
+class TestActivite(ServerTestCase):
+    """Flux d'activite pagine (GET /api/activite)."""
+
+    def setUp(self):
+        super().setUp()
+        server.ingest_logs(logs_payload("pc-a", [
+            log_record("api_request", NOW_MS + i, model="m") for i in range(5)
+        ], user="alice"), ip="192.168.1.10")
+        server.ingest_logs(logs_payload("pc-b", [
+            log_record("tool_decision", NOW_MS + 100, tool_name="Bash",
+                       decision="accept"),
+        ], user="bob"), ip="192.168.1.11")
+
+    def test_carries_machine_ip_and_user(self):
+        got = server.get_activite()
+        self.assertEqual(got["count"], 6)
+        self.assertTrue(all(r["ip"] for r in got["activite"]))
+        self.assertEqual({r["machine"] for r in got["activite"]}, {"pc-a", "pc-b"})
+        self.assertEqual(got["activite"][0]["user"], "bob")  # le plus recent en tete
+
+    def test_pagination_walks_the_whole_feed_without_overlap(self):
+        page1 = server.get_activite(limit=4, offset=0)
+        page2 = server.get_activite(limit=4, offset=4)
+        self.assertEqual(page1["count"], 6)  # total, pas la taille de page
+        self.assertEqual(len(page1["activite"]), 4)
+        self.assertEqual(len(page2["activite"]), 2)
+        times = [r["time"] for r in page1["activite"] + page2["activite"]]
+        self.assertEqual(times, sorted(times, reverse=True))
+
+    def test_filter_by_machine(self):
+        got = server.get_activite(machine="pc-b")
+        self.assertEqual(got["count"], 1)
+        self.assertEqual(got["activite"][0]["tool"], "Bash")
+
+    def test_filter_by_user(self):
+        got = server.get_activite(user="alice")
+        self.assertEqual(got["count"], 5)
+        self.assertTrue(all(r["user"] == "alice" for r in got["activite"]))
+
+    def test_offset_beyond_the_end_gives_an_empty_page(self):
+        got = server.get_activite(limit=20, offset=40)
+        self.assertEqual(got["count"], 6)
+        self.assertEqual(got["activite"], [])
+
+    def test_days_filter_excludes_old_rows(self):
+        got = server.get_activite(days=1)  # NOW_MS est loin dans le passe
+        self.assertEqual((got["count"], got["activite"]), (0, []))
 
 
 class TestPrompts(ServerTestCase):
@@ -514,9 +557,30 @@ class TestPrompts(ServerTestCase):
         self.assertEqual(server.get_prompts(query="introuvable")["count"], 0)
 
     def test_limit_is_honoured_and_clamped(self):
-        self.assertEqual(server.get_prompts(limit=2)["count"], 2)
+        res = server.get_prompts(limit=2)
+        self.assertEqual(len(res["prompts"]), 2)
+        self.assertEqual(res["count"], 3)  # count = total, pas la taille de page
         self.assertEqual(server.get_prompts(limit=0)["limit"], 1)      # plancher
         self.assertEqual(server.get_prompts(limit=99999)["limit"], 1000)  # plafond
+
+    def test_pagination_walks_all_prompts_without_overlap(self):
+        page1 = server.get_prompts(limit=2, offset=0)
+        page2 = server.get_prompts(limit=2, offset=2)
+        self.assertEqual((page1["count"], page2["count"]), (3, 3))
+        texts = [p["text"] for p in page1["prompts"] + page2["prompts"]]
+        self.assertEqual(texts, ["deploie en prod", "ajoute des tests",
+                                 "corrige le bug de login"])
+
+    def test_pagination_and_search_combine(self):
+        # 2 prompts de pc-a : page 2 de taille 1 = le plus ancien des deux.
+        res = server.get_prompts(machine="pc-a", limit=1, offset=1)
+        self.assertEqual(res["count"], 2)
+        self.assertEqual(res["prompts"][0]["text"], "corrige le bug de login")
+
+    def test_negative_offset_is_clamped_to_zero(self):
+        res = server.get_prompts(limit=1, offset=-5)
+        self.assertEqual(res["offset"], 0)
+        self.assertEqual(res["prompts"][0]["text"], "deploie en prod")
 
     def test_sql_wildcards_in_query_are_not_injected(self):
         # '%' est un joker SQL : passe en valeur, il ne doit rien matcher ici.
@@ -598,8 +662,15 @@ class TestMigration(unittest.TestCase):
         self.assertEqual(n, 1)
 
 
-class TestHttpEndpoints(ServerTestCase):
-    """Bout en bout : un vrai serveur HTTP sur un port ephemere."""
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Ne suit pas les 302 : les tests d'auth inspectent la redirection elle-meme."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+class HttpTestCase(ServerTestCase):
+    """Base bout en bout : un vrai serveur HTTP sur un port ephemere."""
 
     def setUp(self):
         super().setUp()
@@ -607,6 +678,7 @@ class TestHttpEndpoints(ServerTestCase):
         self.base = f"http://127.0.0.1:{self.httpd.server_address[1]}"
         self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
         self.thread.start()
+        self._opener = urllib.request.build_opener(_NoRedirect)
 
     def tearDown(self):
         self.httpd.shutdown()
@@ -624,6 +696,19 @@ class TestHttpEndpoints(ServerTestCase):
     def get(self, path):
         with urllib.request.urlopen(self.base + path, timeout=5) as r:
             return r.status, json.loads(r.read())
+
+    def request(self, path, data=None, headers=None, method=None):
+        """Requete brute sans suivi de redirection : (statut, en-tetes, corps)."""
+        req = urllib.request.Request(self.base + path, data=data,
+                                     headers=headers or {}, method=method)
+        try:
+            with self._opener.open(req, timeout=5) as r:
+                return r.status, dict(r.headers), r.read()
+        except urllib.error.HTTPError as e:
+            return e.code, dict(e.headers), e.read()
+
+
+class TestHttpEndpoints(HttpTestCase):
 
     def test_health(self):
         status, body = self.get("/health")
@@ -729,6 +814,210 @@ class TestHttpEndpoints(ServerTestCase):
         status, body = self.get("/api/stats?days=abc")
         self.assertEqual(status, 200)
         self.assertEqual(body["days"], 0)
+
+    def test_activite_endpoint_paginates(self):
+        self.post("/v1/logs", logs_payload("pc-a", [
+            log_record("api_request", NOW_MS + i, model="m") for i in range(3)
+        ]))
+        _, body = self.get("/api/activite?limit=2&offset=2")
+        self.assertEqual(body["count"], 3)
+        self.assertEqual(len(body["activite"]), 1)
+
+    def test_prompts_endpoint_paginates(self):
+        self.post("/v1/logs", logs_payload("pc-a", [
+            log_record("user_prompt", NOW_MS + i, prompt=f"p{i}") for i in range(3)
+        ]))
+        _, body = self.get("/api/prompts?limit=2&offset=2")
+        self.assertEqual(body["count"], 3)
+        self.assertEqual([p["text"] for p in body["prompts"]], ["p0"])
+
+    def test_export_csv_downloads_as_attachment(self):
+        self.post("/v1/logs", logs_payload("pc-a", [
+            log_record("api_request", NOW_MS, model="m", input_tokens=10,
+                       output_tokens=5, cost_usd=0.5),
+        ], user="eric"))
+        status, headers, body = self.request("/api/export?user=eric&format=csv")
+        self.assertEqual(status, 200)
+        self.assertIn("text/csv", headers["Content-Type"])
+        self.assertIn("attachment", headers["Content-Disposition"])
+        self.assertIn("moniteur_eric", headers["Content-Disposition"])
+        text = body.decode("utf-8")
+        self.assertTrue(text.startswith("\ufeff"))  # BOM : accents corrects dans Excel
+        self.assertIn(";".join(server.EXPORT_HEADERS), text)
+        self.assertIn("eric", text)
+
+    def test_export_filters_by_user(self):
+        self.post("/v1/logs", logs_payload("pc-a", [
+            log_record("api_request", NOW_MS, model="m"),
+        ], user="eric"))
+        self.post("/v1/logs", logs_payload("pc-b", [
+            log_record("api_request", NOW_MS, model="m"),
+        ], user="bob"))
+        _, _, body = self.request("/api/export?user=bob")
+        text = body.decode("utf-8")
+        self.assertIn("bob", text)
+        self.assertNotIn("eric", text)
+
+    def test_export_xls_is_spreadsheetml(self):
+        self.post("/v1/logs", logs_payload("pc-a", [
+            log_record("api_request", NOW_MS, model="m"),
+        ], user="eric"))
+        status, headers, body = self.request("/api/export?user=eric&format=xls")
+        self.assertEqual(status, 200)
+        self.assertIn("application/vnd.ms-excel", headers["Content-Type"])
+        self.assertIn(".xls", headers["Content-Disposition"])
+        self.assertIn(b"<Worksheet", body)
+
+    def test_export_rejects_an_unknown_format(self):
+        status, _, _ = self.request("/api/export?format=pdf")
+        self.assertEqual(status, 400)
+
+
+class TestExportFormats(ServerTestCase):
+    """Serialisation CSV / SpreadsheetML des lignes d'export."""
+
+    ROWS = [("2025-10-09 10:00:00", "pc-a", "10.0.0.1", "eric", "jean", "GroupeAI1",
+             "api_request", "claude-sonnet-5", "s-1", 100, 50, 10, 5, 0.25,
+             "Bash", "accept", 'ligne1\navec "guillemets"; et point-virgule')]
+
+    def test_csv_quotes_separators_newlines_and_doubles_quotes(self):
+        text = server.export_csv(self.ROWS)
+        self.assertIn('"ligne1\navec ""guillemets""; et point-virgule"', text)
+        self.assertTrue(text.startswith("\ufeff" + ";".join(server.EXPORT_HEADERS)))
+
+    def test_csv_has_one_line_per_row_plus_header(self):
+        # Le seul \r\n qui compte : le retour a la ligne DANS une cellule est
+        # un \n nu, donc il ne cree pas de ligne CSV supplementaire.
+        text = server.export_csv(self.ROWS)
+        self.assertEqual(text.count("\r\n"), 2)  # en-tete + 1 ligne
+
+    def test_xls_escapes_xml_and_types_numbers(self):
+        rows = [row[:16] + ("<script>&\"fin\"",) for row in self.ROWS]
+        xml = server.export_xls(rows)
+        self.assertIn("&lt;script&gt;&amp;&quot;fin&quot;", xml)
+        self.assertIn('<Data ss:Type="Number">100</Data>', xml)
+        self.assertIn('<Data ss:Type="Number">0.25</Data>', xml)
+        self.assertNotIn("<script>", xml)
+
+    def test_get_export_rows_orders_newest_first(self):
+        server.ingest_logs(logs_payload("pc-a", [
+            log_record("user_prompt", NOW_MS, prompt="ancien"),
+            log_record("user_prompt", NOW_MS + 1000, prompt="recent"),
+        ], user="eric"), ip="10.0.0.1")
+        rows = server.get_export_rows(user="eric")
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0][-1], "recent")
+        self.assertEqual(rows[0][3], "eric")
+
+
+class TestSessions(unittest.TestCase):
+    """Cycle de vie des sessions d'authentification."""
+
+    def tearDown(self):
+        with server._sessions_lock:
+            server._sessions.clear()
+
+    def test_created_session_is_valid_then_destroyed(self):
+        token = server.create_session()
+        self.assertTrue(server.session_valid(token))
+        server.destroy_session(token)
+        self.assertFalse(server.session_valid(token))
+
+    def test_unknown_or_empty_token_is_invalid(self):
+        self.assertFalse(server.session_valid("inconnu"))
+        self.assertFalse(server.session_valid(""))
+        self.assertFalse(server.session_valid(None))
+
+    def test_expired_session_is_rejected_and_purged(self):
+        token = server.create_session()
+        with server._sessions_lock:
+            server._sessions[token] = 0  # expiree depuis 1970
+        self.assertFalse(server.session_valid(token))
+        with server._sessions_lock:
+            self.assertNotIn(token, server._sessions)
+
+    def test_check_password_without_configured_password_always_passes(self):
+        self.assertTrue(server.check_password("n-importe-quoi"))
+        self.assertTrue(server.check_password(None))
+
+
+class TestAuth(HttpTestCase):
+    """Mot de passe configure : dashboard et API proteges, ingestion ouverte."""
+
+    def setUp(self):
+        super().setUp()
+        server.AUTH_PASSWORD = "secret"
+
+    def tearDown(self):
+        server.AUTH_PASSWORD = None
+        with server._sessions_lock:
+            server._sessions.clear()
+        super().tearDown()
+
+    def _login(self, mot_de_passe="secret"):
+        status, headers, _ = self.request(
+            "/login", data=f"mot_de_passe={mot_de_passe}".encode(),
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            method="POST")
+        cookie = (headers.get("Set-Cookie") or "").split(";")[0]
+        return status, headers, cookie
+
+    def test_api_without_session_is_401(self):
+        for path in ("/api/stats", "/api/prompts", "/api/activite", "/api/export"):
+            status, _, _ = self.request(path)
+            self.assertEqual(status, 401, path)
+
+    def test_dashboard_without_session_redirects_to_login(self):
+        status, headers, _ = self.request("/")
+        self.assertEqual(status, 302)
+        self.assertEqual(headers["Location"], "/login")
+
+    def test_login_page_is_served_without_session(self):
+        status, _, body = self.request("/login")
+        self.assertEqual(status, 200)
+        self.assertIn(b"mot_de_passe", body)
+
+    def test_wrong_password_redirects_back_with_error(self):
+        status, headers, cookie = self._login("mauvais")
+        self.assertEqual(status, 302)
+        self.assertEqual(headers["Location"], "/login?erreur=1")
+        self.assertEqual(cookie, "")  # aucun cookie pose
+
+    def test_good_password_opens_a_session_that_unlocks_the_api(self):
+        status, headers, cookie = self._login()
+        self.assertEqual(status, 302)
+        self.assertEqual(headers["Location"], "/")
+        self.assertTrue(cookie.startswith(server.SESSION_COOKIE + "="))
+        self.assertIn("HttpOnly", headers["Set-Cookie"])
+
+        status, _, body = self.request("/api/stats", headers={"Cookie": cookie})
+        self.assertEqual(status, 200)
+        self.assertIn("totals", json.loads(body))
+
+    def test_logout_invalidates_the_session(self):
+        _, _, cookie = self._login()
+        status, headers, _ = self.request("/logout", headers={"Cookie": cookie})
+        self.assertEqual(status, 302)
+        self.assertIn("Max-Age=0", headers["Set-Cookie"])  # cookie efface
+        status, _, _ = self.request("/api/stats", headers={"Cookie": cookie})
+        self.assertEqual(status, 401)
+
+    def test_otlp_ingestion_stays_open_without_any_session(self):
+        # Principe du projet : les machines suivies postent sans identifiant.
+        status, _ = self.post("/v1/logs", logs_payload("pc-a", [
+            log_record("user_prompt", NOW_MS, prompt="sans auth"),
+        ]))
+        self.assertEqual(status, 200)
+
+    def test_health_stays_open(self):
+        status, _, _ = self.request("/health")
+        self.assertEqual(status, 200)
+
+    def test_login_page_redirects_home_once_authenticated(self):
+        _, _, cookie = self._login()
+        status, headers, _ = self.request("/login", headers={"Cookie": cookie})
+        self.assertEqual(status, 302)
+        self.assertEqual(headers["Location"], "/")
 
 
 if __name__ == "__main__":

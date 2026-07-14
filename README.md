@@ -75,6 +75,19 @@ Vous verrez :
 Laissez cette fenêtre ouverte. Ouvrez le tableau de bord dans votre navigateur :
 **http://localhost:4318/**
 
+### Protéger le tableau de bord par mot de passe
+
+```bash
+python server.py --mot-de-passe votre-secret
+# ou : MONITEUR_MOT_DE_PASSE=votre-secret python server.py
+```
+
+Le tableau de bord et l'API (`/api/*`) exigent alors une connexion (page
+`/login`, session de 7 jours, lien « Se deconnecter » dans l'en-tête).
+**L'ingestion OTLP (`/v1/*`) reste toujours ouverte** : les machines suivies
+n'ont aucun identifiant à configurer. Sans l'option, l'accès reste libre comme
+avant. Un redémarrage du serveur invalide les sessions (elles sont en mémoire).
+
 > 💡 Notez l'**adresse IP locale** de cette machine (`ipconfig` sous Windows,
 > `ifconfig`/`ip a` sous macOS/Linux) — les autres machines en auront besoin.
 > Si vous n'utilisez qu'une seule machine, l'adresse est simplement `localhost`.
@@ -260,6 +273,16 @@ Vous y trouverez, par machine et au total :
 - **Taux d'acceptation** des suggestions d'outils ;
 - **Détail par modèle** et **courbe de coût journalier** ;
 - un **flux d'activité récente** horodaté à la seconde.
+
+Les tableaux **Prompts** et **Activité récente** sont paginés (20 lignes par
+page, boutons Précédent/Suivant) — la recherche et les filtres s'appliquent à
+l'ensemble, pas seulement à la page affichée.
+
+Le panneau **Export** télécharge les événements d'un utilisateur (ou de tous)
+sur la période affichée, en **CSV** (UTF-8 + point-virgule, s'ouvre
+directement dans Excel) ou en **XLS** : horodatage, machine, IP, utilisateur,
+DP, compte, tokens, coûts, outils et texte des prompts. Aussi accessible en
+direct : `GET /api/export?user=eric&days=7&format=csv`.
 
 ---
 

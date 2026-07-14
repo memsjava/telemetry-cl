@@ -14,36 +14,54 @@ des prompts.
 Aucune dependance externe : Python 3.8+ standard uniquement.
 
 Lancement :
-    python server.py            (ecoute sur le port 4318)
+    python server.py            (ecoute sur le port 4318, dashboard sans mot de passe)
     python server.py --port 4318 --host 0.0.0.0
+    python server.py --mot-de-passe secret        (dashboard + API proteges)
+    MONITEUR_MOT_DE_PASSE=secret python server.py (idem, via l'environnement)
 
 Routes :
-    POST /v1/metrics   -> ingestion des metriques OTLP
-    POST /v1/logs      -> ingestion des evenements OTLP
+    POST /v1/metrics   -> ingestion des metriques OTLP (jamais protegee)
+    POST /v1/logs      -> ingestion des evenements OTLP (jamais protegee)
     POST /v1/traces    -> accepte et ignore (compat)
     GET  /             -> tableau de bord
     GET  /api/stats    -> donnees agregees (JSON), parametre optionnel ?days=N
-    GET  /api/prompts  -> journal des prompts (?days=N&machine=X&q=recherche)
-    GET  /health       -> etat du serveur
+    GET  /api/prompts  -> journal des prompts (?days=N&machine=X&q=recherche
+                          &limit=N&offset=N — pagine)
+    GET  /api/activite -> activite recente paginee (?days=N&machine=X&limit=N&offset=N)
+    GET  /api/export   -> export des evenements (?user=X&days=N&format=csv|xls)
+    GET  /login, POST /login, GET /logout -> authentification (si mot de passe)
+    GET  /health       -> etat du serveur (jamais protegee)
 """
 
 import argparse
 import gzip
+import hmac
 import json
 import os
+import secrets
 import sqlite3
 import threading
 import time
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, quote, urlparse
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, "data", "telemetry.db")
 DASHBOARD_PATH = os.path.join(BASE_DIR, "web", "dashboard.html")
+LOGIN_PATH = os.path.join(BASE_DIR, "web", "login.html")
 
 _db_lock = threading.Lock()
 _conn = None
+
+# Mot de passe du tableau de bord (None = acces libre, comportement historique).
+# L'ingestion OTLP (/v1/*) n'est JAMAIS protegee : les machines suivies postent
+# sans identifiant, c'est un principe de ce projet.
+AUTH_PASSWORD = None
+SESSION_TTL = 7 * 86400
+SESSION_COOKIE = "moniteur_session"
+_sessions = {}  # token -> horodatage d'expiration
+_sessions_lock = threading.Lock()
 
 
 # --------------------------------------------------------------------------
@@ -536,30 +554,6 @@ def get_stats(days=0):
             for r in cur.fetchall()
         ]
 
-        # --- Activite recente ---
-        cur.execute(
-            """
-            SELECT ts_ms, machine, ip, user, name, model, cost_usd,
-                   input_tokens, output_tokens, tool_name, decision
-            FROM events WHERE ts_ms>=? ORDER BY ts_ms DESC LIMIT 60
-            """,
-            (cutoff,),
-        )
-        recent = []
-        for r in cur.fetchall():
-            recent.append({
-                "time": _fmt_ts(r[0]),
-                "machine": r[1],
-                "ip": r[2] or "",
-                "user": r[3] or "",
-                "event": r[4],
-                "model": r[5] or "",
-                "cost_usd": round(float(r[6] or 0), 4),
-                "tokens": int((r[7] or 0) + (r[8] or 0)),
-                "tool": r[9] or "",
-                "decision": r[10] or "",
-            })
-
     # --- Finalisation + totaux ---
     totals = m("__TOTAL__")
     for name, d in list(machines.items()):
@@ -593,41 +587,104 @@ def get_stats(days=0):
         "totals": totals,
         "machines": per_machine,
         "timeline": timeline,
-        "recent": recent,
     }
+
+
+def _clamp_limit(limit, default=20):
+    limit = default if limit is None else limit
+    return max(1, min(int(limit), 1000))
+
+
+def get_activite(days=0, machine="", user="", limit=20, offset=0):
+    """Flux d'activite pagine (l'onglet "Activite recente" du tableau de bord).
+
+    Sorti de get_stats pour ne pas rejouer tout le flux a chaque poll de 30 s
+    et permettre la pagination cote serveur.
+    """
+    cutoff = _cutoff_ms(days)
+    limit = _clamp_limit(limit)
+    offset = max(0, int(offset or 0))
+
+    where = ["ts_ms>=?"]
+    params = [cutoff]
+    if machine:
+        where.append("machine=?")
+        params.append(machine)
+    if user:
+        where.append("user=?")
+        params.append(user)
+    clause = " AND ".join(where)
+
+    with _db_lock:
+        (total,) = _conn.execute(
+            f"SELECT COUNT(*) FROM events WHERE {clause}", params).fetchone()
+        rows = _conn.execute(
+            f"""
+            SELECT ts_ms, machine, ip, user, name, model, cost_usd,
+                   input_tokens, output_tokens, tool_name, decision
+            FROM events WHERE {clause} ORDER BY ts_ms DESC LIMIT ? OFFSET ?
+            """,
+            params + [limit, offset],
+        ).fetchall()
+
+    activite = [
+        {
+            "time": _fmt_ts(r[0]),
+            "machine": r[1],
+            "ip": r[2] or "",
+            "user": r[3] or "",
+            "event": r[4],
+            "model": r[5] or "",
+            "cost_usd": round(float(r[6] or 0), 4),
+            "tokens": int((r[7] or 0) + (r[8] or 0)),
+            "tool": r[9] or "",
+            "decision": r[10] or "",
+        }
+        for r in rows
+    ]
+    return {"count": int(total), "limit": limit, "offset": offset,
+            "activite": activite}
 
 
 def _fmt_ts(ms):
     return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
 
-def get_prompts(days=0, machine="", user="", query="", limit=200):
-    """Journal des prompts saisis (necessite OTEL_LOG_USER_PROMPTS=1 cote machine)."""
-    cutoff = _cutoff_ms(days)
-    limit = 200 if limit is None else limit
-    limit = max(1, min(int(limit), 1000))
+def get_prompts(days=0, machine="", user="", query="", limit=200, offset=0):
+    """Journal des prompts saisis (necessite OTEL_LOG_USER_PROMPTS=1 cote machine).
 
-    sql = ["SELECT ts_ms, machine, ip, user, session_id, model, prompt, prompt_length",
-           "FROM events WHERE prompt<>'' AND ts_ms>=?"]
+    Pagine : `count` est le total correspondant aux filtres, pas la taille de
+    la page renvoyee.
+    """
+    cutoff = _cutoff_ms(days)
+    limit = _clamp_limit(limit, default=200)
+    offset = max(0, int(offset or 0))
+
+    where = ["prompt<>''", "ts_ms>=?"]
     params = [cutoff]
     if machine:
-        sql.append("AND machine=?")
+        where.append("machine=?")
         params.append(machine)
     if user:
-        sql.append("AND user=?")
+        where.append("user=?")
         params.append(user)
     if query:
         # La recherche est litterale : on neutralise les jokers LIKE (% et _).
         escaped = (query.replace("\\", "\\\\")
                         .replace("%", "\\%")
                         .replace("_", "\\_"))
-        sql.append("AND prompt LIKE ? ESCAPE '\\'")
+        where.append("prompt LIKE ? ESCAPE '\\'")
         params.append(f"%{escaped}%")
-    sql.append("ORDER BY ts_ms DESC LIMIT ?")
-    params.append(limit)
+    clause = " AND ".join(where)
 
     with _db_lock:
-        rows = _conn.execute(" ".join(sql), params).fetchall()
+        (total,) = _conn.execute(
+            f"SELECT COUNT(*) FROM events WHERE {clause}", params).fetchone()
+        rows = _conn.execute(
+            f"SELECT ts_ms, machine, ip, user, session_id, model, prompt, prompt_length"
+            f" FROM events WHERE {clause} ORDER BY ts_ms DESC LIMIT ? OFFSET ?",
+            params + [limit, offset],
+        ).fetchall()
 
     prompts = [
         {
@@ -642,7 +699,127 @@ def get_prompts(days=0, machine="", user="", query="", limit=200):
         }
         for r in rows
     ]
-    return {"count": len(prompts), "limit": limit, "prompts": prompts}
+    return {"count": int(total), "limit": limit, "offset": offset,
+            "prompts": prompts}
+
+
+# --------------------------------------------------------------------------
+# Export CSV / XLS
+# --------------------------------------------------------------------------
+EXPORT_HEADERS = ("heure_utc", "machine", "ip", "utilisateur", "dp", "compte",
+                  "evenement", "modele", "session", "tokens_entree",
+                  "tokens_sortie", "cache_lecture", "cache_creation",
+                  "cout_usd", "outil", "decision", "prompt")
+
+
+def get_export_rows(days=0, user="", machine=""):
+    """Evenements bruts d'un utilisateur (ou de tous), du plus recent au plus ancien."""
+    cutoff = _cutoff_ms(days)
+    where = ["ts_ms>=?"]
+    params = [cutoff]
+    if user:
+        where.append("user=?")
+        params.append(user)
+    if machine:
+        where.append("machine=?")
+        params.append(machine)
+
+    with _db_lock:
+        rows = _conn.execute(
+            f"""
+            SELECT ts_ms, machine, ip, user, dp, compte, name, model, session_id,
+                   input_tokens, output_tokens, cache_read, cache_creation,
+                   cost_usd, tool_name, decision, prompt
+            FROM events WHERE {' AND '.join(where)} ORDER BY ts_ms DESC
+            """,
+            params,
+        ).fetchall()
+
+    return [
+        (_fmt_ts(r[0]), r[1] or "", r[2] or "", r[3] or "", r[4] or "", r[5] or "",
+         r[6] or "", r[7] or "", r[8] or "",
+         int(r[9] or 0), int(r[10] or 0), int(r[11] or 0), int(r[12] or 0),
+         round(float(r[13] or 0), 6), r[14] or "", r[15] or "", r[16] or "")
+        for r in rows
+    ]
+
+
+def export_csv(rows):
+    """CSV pour Excel francais : BOM UTF-8 + point-virgule comme separateur."""
+    def cell(v):
+        s = str(v)
+        if any(c in s for c in ';"\n\r'):
+            s = '"' + s.replace('"', '""') + '"'
+        return s
+
+    lines = [";".join(EXPORT_HEADERS)]
+    lines += [";".join(cell(v) for v in row) for row in rows]
+    return "\ufeff" + "\r\n".join(lines) + "\r\n"
+
+
+def export_xls(rows):
+    """Excel 2003 SpreadsheetML : du XML que Excel/LibreOffice ouvrent en .xls."""
+    def esc(v):
+        return (str(v).replace("&", "&amp;").replace("<", "&lt;")
+                .replace(">", "&gt;").replace('"', "&quot;"))
+
+    def xml_row(values, types):
+        cells = "".join(
+            f'<Cell><Data ss:Type="{t}">{esc(v)}</Data></Cell>'
+            for v, t in zip(values, types))
+        return f"<Row>{cells}</Row>"
+
+    header = xml_row(EXPORT_HEADERS, ["String"] * len(EXPORT_HEADERS))
+    types = (["String"] * 9) + (["Number"] * 5) + (["String"] * 3)
+    body = "".join(xml_row(row, types) for row in rows)
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet"'
+        ' xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet">'
+        '<Worksheet ss:Name="Moniteur"><Table>'
+        f"{header}{body}"
+        "</Table></Worksheet></Workbook>"
+    )
+
+
+# --------------------------------------------------------------------------
+# Sessions d'authentification (dashboard + API ; jamais l'ingestion OTLP)
+# --------------------------------------------------------------------------
+def create_session():
+    """Ouvre une session et renvoie son jeton (a poser en cookie)."""
+    token = secrets.token_urlsafe(32)
+    now = time.time()
+    with _sessions_lock:
+        # purge des sessions expirees au passage
+        for t in [t for t, exp in _sessions.items() if exp < now]:
+            del _sessions[t]
+        _sessions[token] = now + SESSION_TTL
+    return token
+
+
+def session_valid(token):
+    if not token:
+        return False
+    with _sessions_lock:
+        exp = _sessions.get(token)
+        if exp is None:
+            return False
+        if exp < time.time():
+            del _sessions[token]
+            return False
+        return True
+
+
+def destroy_session(token):
+    with _sessions_lock:
+        _sessions.pop(token, None)
+
+
+def check_password(candidate):
+    """Comparaison en temps constant (hmac) pour ne pas fuiter par timing."""
+    if AUTH_PASSWORD is None:
+        return True
+    return hmac.compare_digest(str(candidate or ""), AUTH_PASSWORD)
 
 
 # --------------------------------------------------------------------------
@@ -692,10 +869,12 @@ class Handler(BaseHTTPRequestHandler):
                 pass
         return raw
 
-    def _send(self, code, body=b"", ctype="application/json"):
+    def _send(self, code, body=b"", ctype="application/json", headers=None):
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
+        for key, value in (headers or {}).items():
+            self.send_header(key, value)
         self.end_headers()
         if body:
             self.wfile.write(body)
@@ -703,8 +882,37 @@ class Handler(BaseHTTPRequestHandler):
     def _send_json(self, payload):
         self._send(200, json.dumps(payload).encode("utf-8"))
 
+    def _redirect(self, location, set_cookie=None):
+        headers = {"Location": location}
+        if set_cookie is not None:
+            headers["Set-Cookie"] = set_cookie
+        self._send(302, b"", "text/plain", headers=headers)
+
+    def _session_token(self):
+        """Jeton de session lu dans l'en-tete Cookie (chaine vide si absent)."""
+        for part in (self.headers.get("Cookie") or "").split(";"):
+            name, _, value = part.strip().partition("=")
+            if name == SESSION_COOKIE:
+                return value
+        return ""
+
+    def _authorized(self):
+        return AUTH_PASSWORD is None or session_valid(self._session_token())
+
+    def _serve_file(self, path, missing_label):
+        try:
+            with open(path, "rb") as f:
+                self._send(200, f.read(), "text/html; charset=utf-8")
+        except FileNotFoundError:
+            self._send(500, f"{missing_label} introuvable".encode(), "text/plain")
+
     def do_POST(self):
         path = urlparse(self.path).path
+
+        if path == "/login":
+            self._handle_login()
+            return
+
         if path not in ("/v1/metrics", "/v1/logs", "/v1/traces"):
             self._send(404, b'{"error":"not found"}')
             return
@@ -745,6 +953,20 @@ class Handler(BaseHTTPRequestHandler):
 
         self._send(200, b"{}")
 
+    def _handle_login(self):
+        """POST /login : verifie le mot de passe, pose le cookie de session."""
+        if AUTH_PASSWORD is None:
+            self._redirect("/")
+            return
+        form = parse_qs(self._read_body().decode("utf-8", errors="replace"))
+        if not check_password(form.get("mot_de_passe", [""])[0]):
+            self._redirect("/login?erreur=1")
+            return
+        token = create_session()
+        cookie = (f"{SESSION_COOKIE}={token}; Path=/; Max-Age={SESSION_TTL}; "
+                  "HttpOnly; SameSite=Lax")
+        self._redirect("/", set_cookie=cookie)
+
     def do_GET(self):
         parsed = urlparse(self.path)
         path = parsed.path
@@ -756,8 +978,33 @@ class Handler(BaseHTTPRequestHandler):
             except (TypeError, ValueError):
                 return default
 
+        def qs_str(key):
+            return q.get(key, [""])[0]
+
         if path == "/health":
             self._send(200, b'{"status":"ok"}')
+            return
+
+        if path == "/login":
+            if AUTH_PASSWORD is None or self._authorized():
+                self._redirect("/")
+            else:
+                self._serve_file(LOGIN_PATH, "login.html")
+            return
+
+        if path == "/logout":
+            destroy_session(self._session_token())
+            self._redirect("/login" if AUTH_PASSWORD is not None else "/",
+                           set_cookie=f"{SESSION_COOKIE}=; Path=/; Max-Age=0")
+            return
+
+        # Tout le reste (tableau de bord + API) exige une session si un mot de
+        # passe est configure.
+        if not self._authorized():
+            if path.startswith("/api/"):
+                self._send(401, b'{"error":"authentification requise"}')
+            else:
+                self._redirect("/login")
             return
 
         if path == "/api/stats":
@@ -767,29 +1014,65 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/prompts":
             self._send_json(get_prompts(
                 days=qs_int("days"),
-                machine=q.get("machine", [""])[0],
-                user=q.get("user", [""])[0],
-                query=q.get("q", [""])[0],
+                machine=qs_str("machine"),
+                user=qs_str("user"),
+                query=qs_str("q"),
                 limit=qs_int("limit", 200),
+                offset=qs_int("offset", 0),
             ))
             return
 
+        if path == "/api/activite":
+            self._send_json(get_activite(
+                days=qs_int("days"),
+                machine=qs_str("machine"),
+                user=qs_str("user"),
+                limit=qs_int("limit", 20),
+                offset=qs_int("offset", 0),
+            ))
+            return
+
+        if path == "/api/export":
+            user = qs_str("user")
+            fmt = qs_str("format") or "csv"
+            if fmt not in ("csv", "xls"):
+                self._send(400, b'{"error":"format inconnu (csv ou xls)"}')
+                return
+            rows = get_export_rows(days=qs_int("days"), user=user,
+                                   machine=qs_str("machine"))
+            days = qs_int("days")
+            stem = (f"moniteur_{user or 'tous'}_"
+                    f"{f'{days}j' if days else 'tout'}")
+            if fmt == "csv":
+                body = export_csv(rows).encode("utf-8")
+                ctype = "text/csv; charset=utf-8"
+            else:
+                body = export_xls(rows).encode("utf-8")
+                ctype = "application/vnd.ms-excel"
+            disposition = f"attachment; filename*=UTF-8''{quote(stem)}.{fmt}"
+            self._send(200, body, ctype,
+                       headers={"Content-Disposition": disposition})
+            return
+
         if path in ("/", "/index.html"):
-            try:
-                with open(DASHBOARD_PATH, "rb") as f:
-                    self._send(200, f.read(), "text/html; charset=utf-8")
-            except FileNotFoundError:
-                self._send(500, b"dashboard.html introuvable", "text/plain")
+            self._serve_file(DASHBOARD_PATH, "dashboard.html")
             return
 
         self._send(404, b"not found", "text/plain")
 
 
 def main():
+    global AUTH_PASSWORD
     ap = argparse.ArgumentParser(description="Moniteur Claude Code")
     ap.add_argument("--host", default="0.0.0.0")
     ap.add_argument("--port", type=int, default=4318)
+    ap.add_argument("--mot-de-passe", dest="mot_de_passe",
+                    default=os.environ.get("MONITEUR_MOT_DE_PASSE") or None,
+                    help="Protege le tableau de bord et l'API par mot de passe "
+                         "(defaut : variable MONITEUR_MOT_DE_PASSE ; absent = "
+                         "acces libre). L'ingestion OTLP reste toujours ouverte.")
     args = ap.parse_args()
+    AUTH_PASSWORD = args.mot_de_passe
 
     init_db()
     server = ThreadingHTTPServer((args.host, args.port), Handler)
@@ -798,6 +1081,8 @@ def main():
     print(f" Tableau de bord : http://localhost:{args.port}/")
     print(f" Endpoint OTLP   : http://<IP-de-cette-machine>:{args.port}")
     print(f" Base de donnees : {DB_PATH}")
+    print(f" Authentification: {'activee' if AUTH_PASSWORD else 'desactivee'}"
+          + ("" if AUTH_PASSWORD else " (--mot-de-passe pour proteger)"))
     print("=" * 60)
     print(" En attente de telemetrie... (Ctrl+C pour arreter)")
     try:

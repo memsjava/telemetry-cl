@@ -59,6 +59,14 @@
   input[type=search]{background:var(--panel2);border:1px solid var(--line);
     color:var(--text);border-radius:8px;padding:6px 12px;font-size:13px;min-width:240px}
   input[type=search]:focus{outline:none;border-color:var(--accent)}
+  select,.btn{background:var(--panel2);color:var(--text);border:1px solid var(--line);
+    padding:6px 12px;border-radius:8px;font-size:13px;cursor:pointer}
+  .btn.accent{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600}
+  .pager{display:flex;align-items:center;justify-content:center;gap:14px;
+    padding-top:14px;font-size:13px;color:var(--muted)}
+  .pager button{background:var(--panel2);color:var(--text);border:1px solid var(--line);
+    padding:5px 12px;border-radius:8px;cursor:pointer;font-size:13px}
+  .pager button:disabled{opacity:.35;cursor:default}
   .prompt-text{white-space:pre-wrap;word-break:break-word;line-height:1.45;
     max-width:640px;cursor:pointer}
   .prompt-text.clamped{display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;
@@ -78,6 +86,7 @@
     <button data-days="30">30 j</button>
     <button data-days="0">Tout</button>
   </div>
+  <a href="/logout" class="muted" title="Fermer la session">Se deconnecter</a>
 </header>
 <main>
   <div class="tabs" id="tabs"></div>
@@ -112,31 +121,77 @@
     <h2>Activite recente</h2>
     <div id="recent"></div>
   </div>
+
+  <div class="panel">
+    <h2>
+      Export
+      <span class="grow"></span>
+      <select id="exportUser"><option value="">(tous les utilisateurs)</option></select>
+      <select id="exportFormat">
+        <option value="csv">CSV (Excel)</option>
+        <option value="xls">XLS</option>
+      </select>
+      <button class="btn accent" id="exportBtn">Telecharger</button>
+    </h2>
+    <div class="muted">Exporte les evenements (tokens, couts, outils, prompts...)
+      de l'utilisateur choisi sur la periode affichee
+      <span id="exportScope"></span>.</div>
+  </div>
 </main>
 
 <script>
 let DATA = null, DAYS = 7, TAB = "__ALL__", chart = null;
 let PROMPTS = [], QUERY = "", searchTimer = null;
+let ACTIVITE = [];
+let PPAGE = 0, PTOTAL = 0, APAGE = 0, ATOTAL = 0;
+const PAGE_SIZE = 20;
 
 const palette = ["#d97757","#6ea8fe","#5cc98a","#e5c07b","#c678dd","#56b6c2","#e5776b","#98c379"];
 const fmt = n => (n||0).toLocaleString("fr-FR");
 const usd = n => "$" + (Number(n)||0).toFixed(2);
 
+async function fetchJson(url){
+  const r = await fetch(url);
+  if(r.status === 401){ location.href = "/login"; throw new Error("session expiree"); }
+  return r.json();
+}
+
 async function load(){
-  const r = await fetch("/api/stats?days=" + DAYS);
-  DATA = await r.json();
+  DATA = await fetchJson("/api/stats?days=" + DAYS);
   document.getElementById("updated").textContent = "Mis a jour : " + DATA.generated_at;
-  renderTabs(); render();
+  renderTabs(); render(); renderExport();
   loadPrompts();
+  loadActivite();
 }
 
 async function loadPrompts(){
-  const p = new URLSearchParams({days: DAYS});
+  const p = new URLSearchParams({days: DAYS, limit: PAGE_SIZE, offset: PPAGE*PAGE_SIZE});
   if(TAB !== "__ALL__") p.set("machine", TAB);
   if(QUERY) p.set("q", QUERY);
-  const r = await fetch("/api/prompts?" + p);
-  PROMPTS = (await r.json()).prompts || [];
+  const body = await fetchJson("/api/prompts?" + p);
+  PROMPTS = body.prompts || []; PTOTAL = body.count || 0;
   renderPrompts();
+}
+
+async function loadActivite(){
+  const p = new URLSearchParams({days: DAYS, limit: PAGE_SIZE, offset: APAGE*PAGE_SIZE});
+  if(TAB !== "__ALL__") p.set("machine", TAB);
+  const body = await fetchJson("/api/activite?" + p);
+  ACTIVITE = body.activite || []; ATOTAL = body.count || 0;
+  renderRecent();
+}
+
+function changerPagePrompts(delta){ PPAGE = Math.max(0, PPAGE + delta); loadPrompts(); }
+function changerPageActivite(delta){ APAGE = Math.max(0, APAGE + delta); loadActivite(); }
+
+function pagerHtml(page, total, cb){
+  const pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+  if(pages <= 1) return "";
+  return `<div class="pager">
+    <button onclick="${cb}(-1)" ${page<=0?"disabled":""}>&larr; Precedent</button>
+    <span>Page ${page+1} / ${pages} &middot; ${fmt(total)} element(s)</span>
+    <button onclick="${cb}(1)" ${page>=pages-1?"disabled":""}>Suivant &rarr;</button>
+  </div>`;
 }
 
 function renderTabs(){
@@ -149,7 +204,8 @@ function renderTabs(){
   }
   el.innerHTML = html;
   el.querySelectorAll(".tab").forEach(t=>t.onclick=()=>{
-    TAB=t.dataset.tab; renderTabs(); render(); loadPrompts();
+    TAB=t.dataset.tab; PPAGE=0; APAGE=0;
+    renderTabs(); render(); loadPrompts(); loadActivite();
   });
 }
 
@@ -192,7 +248,6 @@ function render(){
   renderMachines();
   renderChart();
   renderModels(d);
-  renderRecent();
 }
 
 function renderMachines(){
@@ -305,7 +360,8 @@ function renderPrompts(){
   if(!PROMPTS.length){
     el.innerHTML = `<div class="empty">${QUERY
       ? "Aucun prompt ne correspond a cette recherche."
-      : "Aucun prompt enregistre sur cette periode."}</div>`;
+      : "Aucun prompt enregistre sur cette periode."}</div>`
+      + pagerHtml(PPAGE, PTOTAL, "changerPagePrompts");
     return;
   }
 
@@ -319,7 +375,7 @@ function renderPrompts(){
       <td><div class="prompt-text clamped" title="Cliquer pour deplier">${highlight(p.text)}</div></td>
       <td class="num">${fmt(p.length)}</td></tr>`;
   }
-  el.innerHTML = h + "</tbody></table>";
+  el.innerHTML = h + "</tbody></table>" + pagerHtml(PPAGE, PTOTAL, "changerPagePrompts");
   el.querySelectorAll(".prompt-text").forEach(n=>{
     n.onclick = ()=> n.classList.toggle("clamped");
   });
@@ -333,14 +389,17 @@ function highlight(text){
 }
 
 function renderRecent(){
-  const rows = (DATA.recent||[]).filter(r=>TAB==="__ALL__"||r.machine===TAB);
   const el = document.getElementById("recent");
-  if(!rows.length){ el.innerHTML='<div class="empty">Aucune activite recente.</div>'; return; }
+  if(!ACTIVITE.length){
+    el.innerHTML='<div class="empty">Aucune activite recente.</div>'
+      + pagerHtml(APAGE, ATOTAL, "changerPageActivite");
+    return;
+  }
   let h = `<table><thead><tr><th>Heure (UTC)</th><th>Machine</th><th class="user">Utilisateur</th>
     <th class="ip">IP</th>
     <th>Evenement</th><th>Modele</th><th class="num">Tokens</th>
     <th class="num">Cout</th><th>Outil</th></tr></thead><tbody>`;
-  for(const r of rows.slice(0,40)){
+  for(const r of ACTIVITE){
     let dec = "";
     if(r.decision){ const acc = r.decision.toLowerCase().startsWith("acc");
       dec = ` <span class="pill ${acc?"acc":"rej"}">${esc(r.decision)}</span>`; }
@@ -351,7 +410,18 @@ function renderRecent(){
       <td class="num">${r.cost_usd?usd(r.cost_usd):""}</td>
       <td>${esc(r.tool)}${dec}</td></tr>`;
   }
-  el.innerHTML = h + "</tbody></table>";
+  el.innerHTML = h + "</tbody></table>" + pagerHtml(APAGE, ATOTAL, "changerPageActivite");
+}
+
+function renderExport(){
+  const sel = document.getElementById("exportUser");
+  const avant = sel.value;
+  const users = [...new Set(DATA.machines.flatMap(m=>m.users||[]))].sort();
+  sel.innerHTML = '<option value="">(tous les utilisateurs)</option>'
+    + users.map(u=>`<option value="${esc(u)}">${esc(u)}</option>`).join("");
+  if(users.includes(avant)) sel.value = avant;
+  document.getElementById("exportScope").textContent =
+    TAB==="__ALL__" ? "(toutes machines)" : `(machine ${TAB})`;
 }
 
 function esc(s){ return String(s==null?"":s).replace(/[&<>"]/g,
@@ -359,14 +429,25 @@ function esc(s){ return String(s==null?"":s).replace(/[&<>"]/g,
 
 document.querySelectorAll(".range button").forEach(b=>b.onclick=()=>{
   document.querySelectorAll(".range button").forEach(x=>x.classList.remove("active"));
-  b.classList.add("active"); DAYS = parseInt(b.dataset.days); load();
+  b.classList.add("active"); DAYS = parseInt(b.dataset.days);
+  PPAGE = 0; APAGE = 0; load();
 });
 
 document.getElementById("promptSearch").addEventListener("input", e=>{
   QUERY = e.target.value.trim();
+  PPAGE = 0;
   clearTimeout(searchTimer);
   searchTimer = setTimeout(loadPrompts, 250);  // anti-rebond
 });
+
+document.getElementById("exportBtn").onclick = ()=>{
+  const p = new URLSearchParams({days: DAYS,
+    format: document.getElementById("exportFormat").value});
+  const user = document.getElementById("exportUser").value;
+  if(user) p.set("user", user);
+  if(TAB !== "__ALL__") p.set("machine", TAB);
+  location.href = "/api/export?" + p;  // Content-Disposition: attachment
+};
 
 load();
 setInterval(load, 30000); // rafraichissement auto toutes les 30 s

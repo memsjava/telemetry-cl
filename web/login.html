@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Connexion — Moniteur Claude Code</title>
+<style>
+  :root{
+    --bg:#0f1115; --panel:#181b22; --line:#2a2f3a;
+    --text:#e6e9ef; --muted:#9aa4b2; --accent:#d97757; --red:#e5776b;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font-family:system-ui,Segoe UI,Roboto,Arial,sans-serif;
+       background:var(--bg);color:var(--text);
+       display:flex;align-items:center;justify-content:center;min-height:100vh}
+  .box{background:var(--panel);border:1px solid var(--line);border-radius:12px;
+       padding:32px;width:340px}
+  h1{font-size:16px;margin:0 0 20px;font-weight:600}
+  label{display:block;color:var(--muted);font-size:13px;margin-bottom:6px}
+  input[type=password]{width:100%;background:#1f232c;border:1px solid var(--line);
+    color:var(--text);border-radius:8px;padding:9px 12px;font-size:14px}
+  input[type=password]:focus{outline:none;border-color:var(--accent)}
+  button{width:100%;margin-top:16px;background:var(--accent);color:#fff;border:0;
+    border-radius:8px;padding:10px;font-size:14px;font-weight:600;cursor:pointer}
+  .erreur{color:var(--red);font-size:13px;margin:12px 0 0;display:none}
+</style>
+</head>
+<body>
+<form class="box" method="post" action="/login">
+  <h1>🖥️ Moniteur Claude Code</h1>
+  <label for="mdp">Mot de passe</label>
+  <input type="password" id="mdp" name="mot_de_passe" autofocus autocomplete="current-password">
+  <button type="submit">Se connecter</button>
+  <p class="erreur" id="erreur">Mot de passe incorrect.</p>
+</form>
+<script>
+if(new URLSearchParams(location.search).has("erreur"))
+  document.getElementById("erreur").style.display = "block";
+</script>
+</body>
+</html>
