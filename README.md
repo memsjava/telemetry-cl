@@ -284,6 +284,15 @@ l'export ; les filtres s'appliquent côté serveur, donc sur la totalité des
 données. Le tableau **Machines** se trie en cliquant sur les en-têtes de
 colonnes (coût, tokens, sessions, dernière activité...).
 
+La page **Analyse** (lien dans l'en-tête, ou `/analyse`) fournit des analyses
+détaillées calculées avec pandas : coûts par utilisateur/DP/compte/modèle
+(avec coût moyen par prompt, commits et lignes de code), répartition du coût
+par heure et par jour de la semaine, tendance semaine vs semaine précédente,
+efficacité du cache et taux d'erreur API par machine, statistiques de longueur
+des prompts. **pandas est la seule dépendance optionnelle du projet** : à
+installer uniquement sur le serveur central (`pip install pandas`) ; sans lui,
+tout le reste fonctionne et la page explique quoi installer.
+
 Le panneau **Export** télécharge les événements d'un utilisateur (ou de tous)
 sur la période affichée, en **CSV** (UTF-8 + point-virgule, s'ouvre
 directement dans Excel) ou en **XLS** : horodatage, machine, IP, utilisateur,

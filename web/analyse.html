@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Analyse — Moniteur Claude Code</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+<style>
+  :root{
+    --bg:#0f1115; --panel:#181b22; --panel2:#1f232c; --line:#2a2f3a;
+    --text:#e6e9ef; --muted:#9aa4b2; --accent:#d97757; --accent2:#6ea8fe;
+    --green:#5cc98a; --red:#e5776b;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font-family:system-ui,Segoe UI,Roboto,Arial,sans-serif;
+       background:var(--bg);color:var(--text)}
+  header{padding:20px 28px;border-bottom:1px solid var(--line);
+         display:flex;align-items:center;gap:16px;flex-wrap:wrap}
+  header h1{font-size:18px;margin:0;font-weight:600}
+  .grow{flex:1}
+  .muted{color:var(--muted);font-size:13px}
+  a{color:var(--accent2)}
+  .range button{background:var(--panel2);color:var(--text);border:1px solid var(--line);
+    padding:6px 12px;border-radius:8px;cursor:pointer;font-size:13px;margin-left:6px}
+  .range button.active{background:var(--accent);border-color:var(--accent);color:#fff}
+  main{padding:24px 28px;max-width:1200px;margin:0 auto}
+  .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:14px;margin-bottom:24px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px}
+  .card .label{color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:.04em}
+  .card .value{font-size:26px;font-weight:700;margin-top:6px}
+  .card .sub{color:var(--muted);font-size:12px;margin-top:4px}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;
+    padding:18px;margin-bottom:24px}
+  .panel h2{font-size:14px;margin:0 0 14px;font-weight:600}
+  .deux-colonnes{display:grid;grid-template-columns:1fr 1fr;gap:24px}
+  @media(max-width:900px){.deux-colonnes{grid-template-columns:1fr}}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line)}
+  th{color:var(--muted);font-weight:600;font-size:12px;text-transform:uppercase}
+  td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
+  .empty{color:var(--muted);text-align:center;padding:40px}
+  .warn{background:rgba(217,119,87,.1);border:1px solid rgba(217,119,87,.35);
+    color:#f0b9a4;border-radius:10px;padding:12px 14px;font-size:13px;margin-bottom:16px}
+  .warn code{background:rgba(0,0,0,.3);padding:1px 6px;border-radius:4px;
+    font-family:ui-monospace,Consolas,monospace}
+  .hausse{color:var(--red)} .baisse{color:var(--green)}
+  canvas{max-height:260px}
+</style>
+</head>
+<body>
+<header>
+  <h1>📊 Analyse — Moniteur Claude Code</h1>
+  <span class="muted" id="meta"></span>
+  <span class="grow"></span>
+  <div class="range">
+    <span class="muted">Periode :</span>
+    <button data-days="1">24 h</button>
+    <button data-days="7" class="active">7 j</button>
+    <button data-days="30">30 j</button>
+    <button data-days="0">Tout</button>
+  </div>
+  <a href="/" class="muted">← Tableau de bord</a>
+</header>
+<main id="main"><div class="empty">Chargement...</div></main>
+
+<script>
+let DAYS = 7;
+const fmt = n => (n||0).toLocaleString("fr-FR");
+const usd = n => "$" + (Number(n)||0).toFixed(2);
+const esc = s => String(s==null?"":s).replace(/[&<>"]/g,
+  c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+let charts = [];
+
+async function load(){
+  const r = await fetch("/api/analyse?days=" + DAYS);
+  if(r.status === 401){ location.href = "/login"; return; }
+  const d = await r.json();
+  const main = document.getElementById("main");
+  charts.forEach(c=>c.destroy()); charts = [];
+
+  if(!d.disponible){
+    main.innerHTML = `<div class="warn">Analyses indisponibles : ${esc(d.erreur)}<br>
+      Sur le serveur : <code>pip install pandas</code> puis
+      <code>systemctl restart telemetry-cl</code>.</div>`;
+    return;
+  }
+  document.getElementById("meta").textContent =
+    `${fmt(d.evenements_analyses)} evenements analyses · pandas ${d.pandas_version}`;
+
+  const t = d.tendance, lp = d.longueur_prompts;
+  const variation = t.variation_pct === null ? "—"
+    : `<span class="${t.variation_pct>=0?"hausse":"baisse"}">${t.variation_pct>0?"+":""}${t.variation_pct}%</span>`;
+  const card = (label,value,sub)=>`<div class="card"><div class="label">${label}</div>
+    <div class="value">${value}</div><div class="sub">${sub||""}</div></div>`;
+
+  let h = `<div class="cards">
+    ${card("Cout 7 derniers jours", usd(t.cout_7_derniers_jours),
+           usd(t.cout_7_jours_precedents)+" les 7 jours precedents")}
+    ${card("Variation", variation, "semaine vs semaine precedente")}
+    ${card("Longueur des prompts", fmt(lp.mediane)+" car.",
+           `moyenne ${fmt(lp.moyenne)} · p90 ${fmt(lp.p90)} · max ${fmt(lp.max)}`)}
+    ${card("Prompts analyses", fmt(lp.nombre), "avec texte enregistre")}
+  </div>`;
+
+  h += `<div class="deux-colonnes">
+    <div class="panel"><h2>Cout par heure de la journee (UTC)</h2><canvas id="cHeure"></canvas></div>
+    <div class="panel"><h2>Cout par jour de la semaine</h2><canvas id="cJour"></canvas></div>
+  </div>`;
+
+  const tbl = (titre, rows, cols)=>{
+    if(!rows.length) return `<div class="panel"><h2>${titre}</h2>
+      <div class="empty">Aucune donnee sur cette periode.</div></div>`;
+    let t = `<div class="panel"><h2>${titre}</h2><table><thead><tr>`;
+    for(const c of cols) t += `<th class="${c.num?"num":""}">${c.label}</th>`;
+    t += "</tr></thead><tbody>";
+    for(const r of rows){
+      t += "<tr>";
+      for(const c of cols){
+        const v = r[c.key];
+        t += `<td class="${c.num?"num":""}">${c.render? c.render(v) : esc(v)}</td>`;
+      }
+      t += "</tr>";
+    }
+    return t + "</tbody></table></div>";
+  };
+
+  const colsIdentite = (cle,label)=>[
+    {key:cle, label},
+    {key:"cout_usd", label:"Cout", num:true, render:usd},
+    {key:"tokens", label:"Tokens", num:true, render:fmt},
+    {key:"prompts", label:"Prompts", num:true, render:fmt},
+    {key:"requetes_api", label:"Requetes", num:true, render:fmt},
+    {key:"cout_moyen_par_prompt", label:"Cout/prompt", num:true, render:usd},
+    {key:"machines", label:"Machines", num:true, render:fmt},
+  ];
+  const colsUser = colsIdentite("user","Utilisateur").concat([
+    {key:"commits", label:"Commits", num:true, render:fmt},
+    {key:"lignes_ajoutees", label:"Lignes +", num:true, render:fmt},
+  ]);
+
+  h += tbl("Par utilisateur", d.par_utilisateur, colsUser);
+  h += `<div class="deux-colonnes">`
+    + tbl("Par directeur de projet", d.par_dp, colsIdentite("dp","DP"))
+    + tbl("Par compte Claude", d.par_compte, colsIdentite("compte","Compte"))
+    + `</div>`;
+
+  h += tbl("Par modele", d.par_modele, [
+    {key:"modele", label:"Modele"},
+    {key:"cout_usd", label:"Cout", num:true, render:usd},
+    {key:"part_cout_pct", label:"Part du cout", num:true, render:v=>v+" %"},
+    {key:"tokens", label:"Tokens", num:true, render:fmt},
+    {key:"requetes", label:"Requetes", num:true, render:fmt},
+  ]);
+
+  h += `<div class="deux-colonnes">`
+    + tbl("Efficacite du cache par machine", d.cache_par_machine, [
+        {key:"machine", label:"Machine"},
+        {key:"taux_cache_pct", label:"Taux de cache", num:true, render:v=>v+" %"},
+        {key:"cache_lu", label:"Tokens caches", num:true, render:fmt},
+        {key:"tokens_entree", label:"Tokens entree", num:true, render:fmt},
+      ])
+    + tbl("Erreurs API par machine", d.erreurs_par_machine, [
+        {key:"machine", label:"Machine"},
+        {key:"taux_erreur_pct", label:"Taux d'erreur", num:true, render:v=>v+" %"},
+        {key:"erreurs_api", label:"Erreurs", num:true, render:fmt},
+        {key:"requetes_api", label:"Requetes", num:true, render:fmt},
+      ])
+    + `</div>`;
+
+  main.innerHTML = h;
+
+  const bar = (id, labels, values)=>{
+    charts.push(new Chart(document.getElementById(id), {
+      type:"bar",
+      data:{labels, datasets:[{data:values, backgroundColor:"#d97757"}]},
+      options:{responsive:true, plugins:{legend:{display:false}},
+        scales:{x:{ticks:{color:"#9aa4b2"},grid:{color:"#2a2f3a"}},
+                y:{ticks:{color:"#9aa4b2",callback:v=>"$"+(Math.round(v*100)/100)},
+                   grid:{color:"#2a2f3a"}}}}
+    }));
+  };
+  bar("cHeure", d.par_heure.map(x=>x.heure+" h"), d.par_heure.map(x=>x.cout_usd));
+  bar("cJour", d.par_jour_semaine.map(x=>x.jour), d.par_jour_semaine.map(x=>x.cout_usd));
+}
+
+document.querySelectorAll(".range button").forEach(b=>b.onclick=()=>{
+  document.querySelectorAll(".range button").forEach(x=>x.classList.remove("active"));
+  b.classList.add("active"); DAYS = parseInt(b.dataset.days); load();
+});
+
+load();
+</script>
+</body>
+</html>

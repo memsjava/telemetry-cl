@@ -16,7 +16,7 @@ tracked machine just points OTLP at this collector; there is no auth token to ma
 python server.py                        # listens on 0.0.0.0:4318
 python server.py --port 4319 --host 127.0.0.1
 
-python -m unittest discover -p "test_*.py"             # full suite (167 tests), run from repo root
+python -m unittest discover -p "test_*.py"             # full suite (184 tests), run from repo root
 python -m unittest tests.test_server.TestPrompts -v            # one class
 python -m unittest tests.test_server.TestPrompts.test_search   # one test
 ```
@@ -24,7 +24,12 @@ python -m unittest tests.test_server.TestPrompts.test_search   # one test
 No build step for the server, no package manager, no `requirements.txt` — `server.py` and `tests/test_server.py`
 are stdlib-only (Python 3.8+) by design (see `server.py`'s module docstring). Do not add external Python
 dependencies (e.g. `flask`, `fastapi`, `requests`, `pytest`); that would break the "zero-dependency" property that
-half of this project is built around. `tests/` has an `__init__.py` (so the dotted `tests.test_server...` form
+half of this project is built around. **The single sanctioned exception is the `analyse/` package (pandas)**:
+it is lazy-imported only by the `/api/analyse` route, the server runs fine without it (the route answers 501
+with a "pip install pandas" message, the page displays it), and `tests/test_analyse.py` skips itself when
+pandas is absent. Keep any future pandas code inside `analyse/` (the computation lives in
+`analyse/calculs.py`; `__init__.py` only re-exports `compute`) — never import it (even indirectly) from
+`server.py`'s module level or from `cli/`. `tests/` has an `__init__.py` (so the dotted `tests.test_server...` form
 above works) but is otherwise a plain folder — always invoke from the **repo root**, since `tests/test_server.py`
 does `import server` (top-level module, repo root), `tests/test_configurer.py` does
 `from cli import configurer_machine` (needs `cli/` importable as a package, hence `cli/__init__.py`), and that

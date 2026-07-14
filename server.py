@@ -29,6 +29,9 @@ Routes :
                           &limit=N&offset=N — pagine)
     GET  /api/activite -> activite recente paginee (?days=N&machine=X&limit=N&offset=N)
     GET  /api/export   -> export des evenements (?user=X&days=N&format=csv|xls)
+    GET  /analyse      -> page d'analyses ; GET /api/analyse (?days=N) fournit
+                          les donnees, calculees avec pandas (dependance
+                          OPTIONNELLE : sans pandas, reponse 501 explicative)
     GET  /login, POST /login, GET /logout -> authentification (si mot de passe)
     GET  /health       -> etat du serveur (jamais protegee)
 """
@@ -50,6 +53,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, "data", "telemetry.db")
 DASHBOARD_PATH = os.path.join(BASE_DIR, "web", "dashboard.html")
 LOGIN_PATH = os.path.join(BASE_DIR, "web", "login.html")
+ANALYSE_PATH = os.path.join(BASE_DIR, "web", "analyse.html")
 
 _db_lock = threading.Lock()
 _conn = None
@@ -1061,6 +1065,27 @@ class Handler(BaseHTTPRequestHandler):
             disposition = f"attachment; filename*=UTF-8''{quote(stem)}.{fmt}"
             self._send(200, body, ctype,
                        headers={"Content-Disposition": disposition})
+            return
+
+        if path == "/api/analyse":
+            # pandas est la seule dependance optionnelle du projet : la route
+            # explique quoi installer plutot que d'empecher le serveur de tourner.
+            try:
+                import analyse
+            except ImportError:
+                self._send(501, json.dumps({
+                    "disponible": False,
+                    "erreur": "pandas n'est pas installe sur le serveur : "
+                              "pip install pandas, puis redemarrez le Moniteur.",
+                }).encode("utf-8"))
+                return
+            with _db_lock:
+                data = analyse.compute(_conn, days=qs_int("days"))
+            self._send_json(data)
+            return
+
+        if path == "/analyse":
+            self._serve_file(ANALYSE_PATH, "analyse.html")
             return
 
         if path in ("/", "/index.html"):
