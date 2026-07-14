@@ -1,7 +1,7 @@
 {
   "name": "moniteur-claude-code",
   "version": "1.0.0",
-  "description": "Configure une machine pour envoyer sa telemetrie Claude Code au Moniteur (npx github:memsjava/telemetry-cl)",
+  "description": "Claude Code Moniteur (npx github:memsjava/telemetry-cl)",
   "type": "module",
   "bin": {
     "configurer-machine": "./bin/configurer-machine.js"

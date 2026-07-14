@@ -63,6 +63,8 @@ def init_db():
             machine TEXT,
             ip TEXT DEFAULT '',
             user TEXT DEFAULT '',
+            dp TEXT DEFAULT '',
+            compte TEXT DEFAULT '',
             name TEXT,
             session_id TEXT,
             model TEXT,
@@ -84,6 +86,8 @@ def init_db():
             machine TEXT,
             ip TEXT DEFAULT '',
             user TEXT DEFAULT '',
+            dp TEXT DEFAULT '',
+            compte TEXT DEFAULT '',
             name TEXT,
             type TEXT,
             model TEXT,
@@ -107,12 +111,16 @@ def _migrate_columns():
         "events": (
             ("ip", "TEXT DEFAULT ''"),
             ("user", "TEXT DEFAULT ''"),
+            ("dp", "TEXT DEFAULT ''"),
+            ("compte", "TEXT DEFAULT ''"),
             ("prompt", "TEXT DEFAULT ''"),
             ("prompt_length", "REAL DEFAULT 0"),
         ),
         "metrics": (
             ("ip", "TEXT DEFAULT ''"),
             ("user", "TEXT DEFAULT ''"),
+            ("dp", "TEXT DEFAULT ''"),
+            ("compte", "TEXT DEFAULT ''"),
         ),
     }
     for table, columns in wanted.items():
@@ -172,6 +180,20 @@ def resolve_machine(resource_attrs, point_attrs):
     return "inconnu"
 
 
+def _resolve_attr(key, resource_attrs, point_attrs):
+    """Attribut pose par le configurateur de machine (aucune chaine de repli).
+
+    Ces cles ("user", "dp", "compte") n'existent pas dans la telemetrie native
+    de Claude Code : c'est le configurateur qui les injecte dans
+    OTEL_RESOURCE_ATTRIBUTES. Absentes -> chaine vide.
+    """
+    for src in (point_attrs, resource_attrs):
+        val = src.get(key)
+        if val:
+            return str(val)
+    return ""
+
+
 def resolve_user(resource_attrs, point_attrs):
     """Utilisateur systeme (session Windows/Mac/Linux), pose via OTEL_RESOURCE_ATTRIBUTES.
 
@@ -179,11 +201,17 @@ def resolve_user(resource_attrs, point_attrs):
     identique pour tous quand un compte Pro/Max est partage) : c'est le
     configurateur de machine qui ajoute cette cle "user" lui-meme.
     """
-    for src in (point_attrs, resource_attrs):
-        val = src.get("user")
-        if val:
-            return str(val)
-    return ""
+    return _resolve_attr("user", resource_attrs, point_attrs)
+
+
+def resolve_dp(resource_attrs, point_attrs):
+    """Directeur de projet declare a l'installation (cle "dp")."""
+    return _resolve_attr("dp", resource_attrs, point_attrs)
+
+
+def resolve_compte(resource_attrs, point_attrs):
+    """Nom du compte Claude partage declare a l'installation (cle "compte")."""
+    return _resolve_attr("compte", resource_attrs, point_attrs)
 
 
 def _to_num(x):
@@ -236,9 +264,11 @@ def ingest_metrics(payload, ip=""):
                         p_attrs = attrs_to_dict(dp.get("attributes"))
                         machine = resolve_machine(r_attrs, p_attrs)
                         user = resolve_user(r_attrs, p_attrs)
+                        dp_name = resolve_dp(r_attrs, p_attrs)
+                        compte = resolve_compte(r_attrs, p_attrs)
                         ms = _ns_to_ms(dp.get("timeUnixNano") or dp.get("startTimeUnixNano"))
                         rows.append((
-                            ms, _day_of(ms), machine, ip, user, name,
+                            ms, _day_of(ms), machine, ip, user, dp_name, compte, name,
                             str(p_attrs.get("type", "")),
                             str(p_attrs.get("model", "")),
                             str(p_attrs.get("tool_name", "")),
@@ -250,8 +280,8 @@ def ingest_metrics(payload, ip=""):
     if rows:
         with _db_lock:
             _conn.executemany(
-                "INSERT INTO metrics (ts_ms,day,machine,ip,user,name,type,model,tool_name,decision,value)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO metrics (ts_ms,day,machine,ip,user,dp,compte,name,type,model,tool_name,decision,value)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 rows,
             )
             _conn.commit()
@@ -270,13 +300,15 @@ def ingest_logs(payload, ip=""):
                     name = short(a.get("event.name") or _attr_value(rec.get("body")) or "")
                     machine = resolve_machine(r_attrs, a)
                     user = resolve_user(r_attrs, a)
+                    dp_name = resolve_dp(r_attrs, a)
+                    compte = resolve_compte(r_attrs, a)
                     ms = _ns_to_ms(rec.get("timeUnixNano") or rec.get("observedTimeUnixNano"))
                     decision = a.get("decision")
                     prompt = a.get("prompt") or ""
                     if prompt:
                         prompts_seen += 1
                     rows.append((
-                        ms, _day_of(ms), machine, ip, user, name,
+                        ms, _day_of(ms), machine, ip, user, dp_name, compte, name,
                         str(a.get("session.id") or a.get("session_id") or ""),
                         str(a.get("model") or ""),
                         _to_num(a.get("input_tokens")),
@@ -295,10 +327,10 @@ def ingest_logs(payload, ip=""):
     if rows:
         with _db_lock:
             _conn.executemany(
-                "INSERT INTO events (ts_ms,day,machine,ip,user,name,session_id,model,"
+                "INSERT INTO events (ts_ms,day,machine,ip,user,dp,compte,name,session_id,model,"
                 "input_tokens,output_tokens,cache_read,cache_creation,cost_usd,"
                 "tool_name,decision,success,prompt,prompt_length)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 rows,
             )
             _conn.commit()
@@ -336,6 +368,10 @@ def get_stats(days=0):
                 "ips": [],
                 "user": "",
                 "users": [],
+                "dp": "",
+                "dps": [],
+                "compte": "",
+                "comptes": [],
                 "cost_usd": 0.0,
                 "tokens": {"input": 0, "output": 0, "cache_read": 0,
                            "cache_creation": 0, "total": 0},
@@ -388,45 +424,27 @@ def get_stats(days=0):
             d["first_ms"] = row[10]
             d["last_ms"] = row[11]
 
-        # --- Adresses IP vues par machine (la plus recente en tete) ---
-        cur.execute(
-            """
-            SELECT machine, ip, MAX(ts_ms) AS last_seen
-            FROM (
-                SELECT machine, ip, ts_ms FROM events WHERE ip<>'' AND ts_ms>=?
-                UNION ALL
-                SELECT machine, ip, ts_ms FROM metrics WHERE ip<>'' AND ts_ms>=?
+        # --- IP / utilisateur / DP / compte vus par machine (le plus recent en tete) ---
+        for col, list_key in (("ip", "ips"), ("user", "users"),
+                              ("dp", "dps"), ("compte", "comptes")):
+            cur.execute(
+                f"""
+                SELECT machine, {col}, MAX(ts_ms) AS last_seen
+                FROM (
+                    SELECT machine, {col}, ts_ms FROM events WHERE {col}<>'' AND ts_ms>=?
+                    UNION ALL
+                    SELECT machine, {col}, ts_ms FROM metrics WHERE {col}<>'' AND ts_ms>=?
+                )
+                GROUP BY machine, {col} ORDER BY last_seen DESC
+                """,
+                (cutoff, cutoff),
             )
-            GROUP BY machine, ip ORDER BY last_seen DESC
-            """,
-            (cutoff, cutoff),
-        )
-        for machine, ip, _last in cur.fetchall():
-            d = m(machine)
-            if ip not in d["ips"]:
-                d["ips"].append(ip)
-        for d in machines.values():
-            d["ip"] = d["ips"][0] if d["ips"] else ""
-
-        # --- Utilisateurs systeme vus par machine (le plus recent en tete) ---
-        cur.execute(
-            """
-            SELECT machine, user, MAX(ts_ms) AS last_seen
-            FROM (
-                SELECT machine, user, ts_ms FROM events WHERE user<>'' AND ts_ms>=?
-                UNION ALL
-                SELECT machine, user, ts_ms FROM metrics WHERE user<>'' AND ts_ms>=?
-            )
-            GROUP BY machine, user ORDER BY last_seen DESC
-            """,
-            (cutoff, cutoff),
-        )
-        for machine, user, _last in cur.fetchall():
-            d = m(machine)
-            if user not in d["users"]:
-                d["users"].append(user)
-        for d in machines.values():
-            d["user"] = d["users"][0] if d["users"] else ""
+            for machine, val, _last in cur.fetchall():
+                d = m(machine)
+                if val not in d[list_key]:
+                    d[list_key].append(val)
+            for d in machines.values():
+                d[col] = d[list_key][0] if d[list_key] else ""
 
         # --- Decisions d'outils ---
         cur.execute(
@@ -562,7 +580,8 @@ def get_stats(days=0):
         totals["tools"]["rejected"] += d["tools"]["rejected"]
 
     totals["cost_usd"] = round(totals["cost_usd"], 4)
-    for key in ("by_model", "first_ms", "last_ms", "ip", "ips", "user", "users"):
+    for key in ("by_model", "first_ms", "last_ms", "ip", "ips", "user", "users",
+                "dp", "dps", "compte", "comptes"):
         totals.pop(key, None)
 
     per_machine = [machines[k] for k in machines if k != "__TOTAL__"]

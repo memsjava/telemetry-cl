@@ -13,22 +13,24 @@
 //   npx github:memsjava/telemetry-cl                     (machine = hostname, collecteur = defaut)
 //   npx github:memsjava/telemetry-cl --machine pc-bureau  (etiquette explicite)
 //   npx github:memsjava/telemetry-cl --collecteur localhost --machine pc-bureau  (autre collecteur)
-//   npx github:memsjava/telemetry-cl --utilisateur eric
+//   npx github:memsjava/telemetry-cl --utilisateur eric --dp jean --compte GroupeAI1
 //   npx github:memsjava/telemetry-cl --sans-prompts
 //   npx github:memsjava/telemetry-cl --retirer                         (annule la config)
 //   npx github:memsjava/telemetry-cl --simuler                         (aucune ecriture)
 
 import os from "node:os";
+import readline from "node:readline/promises";
 
 import {
   DEFAULT_COLLECTEUR,
   DEFAULT_PORT,
   DEFAULT_SETTINGS_PATH,
   buildEnv,
-  detectOsUser,
   loadSettings,
   mergeEnv,
+  parseResourceAttributes,
   removeEnv,
+  resoudreIdentite,
   writeSettings,
 } from "../lib/config.js";
 
@@ -41,6 +43,8 @@ Options :
                              bord (defaut : nom d'hote)
   --utilisateur, -u <nom>    Nom d'utilisateur affiche (defaut : utilisateur
                              systeme courant)
+  --dp <nom>                 Directeur de projet responsable de cette machine
+  --compte <nom>             Nom du compte Claude partage (ex. GroupeAI1)
   --port, -p <port>          Port du collecteur (defaut : ${DEFAULT_PORT})
   --sans-prompts             Ne pas enregistrer le texte des prompts
   --retirer                  Retire la configuration du Moniteur de settings.json
@@ -54,6 +58,8 @@ function parseArgs(argv) {
     collecteur: DEFAULT_COLLECTEUR,
     machine: os.hostname(),
     utilisateur: null,
+    dp: null,
+    compte: null,
     port: DEFAULT_PORT,
     sansPrompts: false,
     retirer: false,
@@ -83,6 +89,12 @@ function parseArgs(argv) {
       case "--utilisateur":
       case "-u":
         args.utilisateur = takeValue(arg, argv[++i]);
+        break;
+      case "--dp":
+        args.dp = takeValue(arg, argv[++i]);
+        break;
+      case "--compte":
+        args.compte = takeValue(arg, argv[++i]);
         break;
       case "--port":
       case "-p":
@@ -149,16 +161,54 @@ async function main(argv) {
     updated = removeEnv(settings);
     action = "retiree de";
   } else {
-    const osUser = args.utilisateur ?? detectOsUser();
+    const envActuel = settings.env;
+    const existants = parseResourceAttributes(
+      envActuel && typeof envActuel === "object" && !Array.isArray(envActuel)
+        ? envActuel.OTEL_RESOURCE_ATTRIBUTES ?? ""
+        : "",
+    );
+
+    // Questions interactives uniquement dans un vrai terminal : un lancement
+    // scripte (stdin redirige) garde les valeurs deja configurees.
+    let poser = null;
+    let rl = null;
+    if (process.stdin.isTTY && process.stdout.isTTY) {
+      rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+      poser = async (label, defaut) => {
+        const suffixe = defaut ? ` [${defaut}]` : "";
+        let reponse;
+        try {
+          reponse = (await rl.question(`${label}${suffixe} : `)).trim();
+        } catch {
+          return defaut; // stdin ferme en plein prompt (Ctrl+D) : on garde le defaut
+        }
+        return reponse || defaut;
+      };
+    }
+    let identite;
+    try {
+      identite = await resoudreIdentite(
+        { utilisateur: args.utilisateur, dp: args.dp, compte: args.compte },
+        existants, poser,
+      );
+    } finally {
+      rl?.close();
+    }
+
+    const { osUser, dp, compte } = identite;
     const env = buildEnv(args.collecteur, args.machine, {
       port: args.port,
       logPrompts: !args.sansPrompts,
       osUser,
+      dp,
+      compte,
     });
     updated = mergeEnv(settings, env);
     action = "ecrite dans";
     details = `  machine     : ${args.machine}\n`
       + `  utilisateur : ${osUser}\n`
+      + `  directeur de projet : ${dp || "-"}\n`
+      + `  compte      : ${compte || "-"}\n`
       + `  endpoint    : ${env.OTEL_EXPORTER_OTLP_ENDPOINT}\n`
       + `  prompts     : ${args.sansPrompts ? "non enregistres" : "enregistres"}\n`;
   }

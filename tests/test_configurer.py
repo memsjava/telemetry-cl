@@ -44,6 +44,23 @@ class TestBuildEnv(unittest.TestCase):
         env = cm.build_env("localhost", "pc", os_user="a,b=c")
         self.assertEqual(env["OTEL_RESOURCE_ATTRIBUTES"], "machine=pc,user=a%2Cb%3Dc")
 
+    def test_dp_and_compte_land_in_resource_attributes(self):
+        env = cm.build_env("localhost", "pc", os_user="eric",
+                           dp="jean", compte="GroupeAI1")
+        self.assertEqual(env["OTEL_RESOURCE_ATTRIBUTES"],
+                         "machine=pc,user=eric,dp=jean,compte=GroupeAI1")
+
+    def test_empty_dp_and_compte_are_omitted_from_resource_attributes(self):
+        # Pas de "dp=" vide : le serveur traite deja l'absence comme "".
+        env = cm.build_env("localhost", "pc", os_user="eric")
+        self.assertEqual(env["OTEL_RESOURCE_ATTRIBUTES"], "machine=pc,user=eric")
+
+    def test_dp_and_compte_values_are_percent_encoded(self):
+        env = cm.build_env("localhost", "pc", os_user="eric",
+                           dp="a,b", compte="c=d")
+        self.assertEqual(env["OTEL_RESOURCE_ATTRIBUTES"],
+                         "machine=pc,user=eric,dp=a%2Cb,compte=c%3Dd")
+
     def test_protocol_is_json_because_server_cannot_read_protobuf(self):
         self.assertEqual(cm.build_env("h", "m")["OTEL_EXPORTER_OTLP_PROTOCOL"], "http/json")
 
@@ -75,6 +92,100 @@ class TestEncodeResourceValue(unittest.TestCase):
         # Sinon un "%2C" litteral dans la valeur d'origine serait indiscernable
         # d'une virgule encodee par cette fonction.
         self.assertEqual(cm._encode_resource_value("100%"), "100%25")
+
+
+class TestParseResourceAttrs(unittest.TestCase):
+    def test_round_trip_with_build_env(self):
+        env = cm.build_env("h", "pc", os_user="a,b=c", dp="100%", compte="GroupeAI1")
+        got = cm.parse_resource_attrs(env["OTEL_RESOURCE_ATTRIBUTES"])
+        self.assertEqual(got, {"machine": "pc", "user": "a,b=c",
+                               "dp": "100%", "compte": "GroupeAI1"})
+
+    def test_empty_string_gives_empty_dict(self):
+        self.assertEqual(cm.parse_resource_attrs(""), {})
+
+    def test_parts_without_equals_are_ignored(self):
+        self.assertEqual(cm.parse_resource_attrs("machine=pc,garbage,user=eric"),
+                         {"machine": "pc", "user": "eric"})
+
+
+class TestDemander(unittest.TestCase):
+    def _with_input(self, typed, label="Question", defaut=""):
+        from unittest.mock import patch
+        with patch("builtins.input", return_value=typed):
+            return cm.demander(label, defaut)
+
+    def test_typed_answer_wins(self):
+        self.assertEqual(self._with_input("jean", defaut="marc"), "jean")
+
+    def test_empty_answer_keeps_the_default(self):
+        self.assertEqual(self._with_input("", defaut="marc"), "marc")
+
+    def test_whitespace_only_answer_keeps_the_default(self):
+        self.assertEqual(self._with_input("   ", defaut="marc"), "marc")
+
+    def test_eof_keeps_the_default(self):
+        # stdin ferme en plein prompt (Ctrl+D) : on retombe sur le defaut.
+        from unittest.mock import patch
+        with patch("builtins.input", side_effect=EOFError):
+            self.assertEqual(cm.demander("Question", "marc"), "marc")
+
+
+class TestResoudreIdentite(unittest.TestCase):
+    """flags CLI > question interactive > valeurs deja configurees."""
+
+    @staticmethod
+    def _poser_fixe(reponses):
+        """Simule l'operateur : repond `reponses[label]` a chaque question."""
+        questions = []
+
+        def poser(label, defaut=""):
+            questions.append(label)
+            return reponses.get(label, defaut)
+        return poser, questions
+
+    def test_flags_short_circuit_every_question(self):
+        poser, questions = self._poser_fixe({})
+        got = cm.resoudre_identite("eric", "jean", "GroupeAI1", {},
+                                   interactif=True, poser=poser)
+        self.assertEqual(got, ("eric", "jean", "GroupeAI1"))
+        self.assertEqual(questions, [])  # rien n'a ete demande
+
+    def test_interactive_mode_asks_only_the_missing_values(self):
+        poser, questions = self._poser_fixe({
+            "Directeur de projet (dp)": "jean",
+            "Compte Claude (ex. GroupeAI1)": "GroupeAI1",
+        })
+        got = cm.resoudre_identite("eric", None, None, {},
+                                   interactif=True, poser=poser)
+        self.assertEqual(got, ("eric", "jean", "GroupeAI1"))
+        self.assertEqual(len(questions), 2)  # utilisateur donne en flag : pas demande
+
+    def test_interactive_defaults_come_from_the_existing_configuration(self):
+        # Entree sur chaque question : les valeurs deja configurees sont gardees.
+        defauts = []
+
+        def poser(label, defaut=""):
+            defauts.append(defaut)
+            return defaut
+        existants = {"user": "alice", "dp": "jean", "compte": "GroupeAI1"}
+        got = cm.resoudre_identite(None, None, None, existants,
+                                   interactif=True, poser=poser)
+        self.assertEqual(got, ("alice", "jean", "GroupeAI1"))
+        self.assertEqual(defauts, ["alice", "jean", "GroupeAI1"])
+
+    def test_non_interactive_keeps_existing_dp_and_compte(self):
+        existants = {"dp": "jean", "compte": "GroupeAI1"}
+        utilisateur, dp, compte = cm.resoudre_identite(
+            None, None, None, existants, interactif=False)
+        self.assertEqual(utilisateur, cm.detect_os_user())
+        self.assertEqual((dp, compte), ("jean", "GroupeAI1"))
+
+    def test_non_interactive_first_install_yields_empty_dp_and_compte(self):
+        utilisateur, dp, compte = cm.resoudre_identite(
+            None, None, None, {}, interactif=False)
+        self.assertEqual(utilisateur, cm.detect_os_user())
+        self.assertEqual((dp, compte), ("", ""))
 
 
 class TestDetectOsUser(unittest.TestCase):
@@ -235,10 +346,12 @@ class TestCliDefaults(unittest.TestCase):
         self._tmp.cleanup()
 
     def _run(self, *args):
+        # stdin=DEVNULL : jamais de questions interactives, meme quand la suite
+        # de tests est lancee depuis un vrai terminal.
         result = subprocess.run(
             [sys.executable, str(self.script), "--settings", self.settings,
              "--simuler", *args],
-            capture_output=True, text=True, check=True,
+            capture_output=True, text=True, check=True, stdin=subprocess.DEVNULL,
         )
         return json.loads(result.stdout.split("deviendrait :", 1)[1])
 
@@ -257,6 +370,29 @@ class TestCliDefaults(unittest.TestCase):
         updated = self._run("--collecteur", "localhost")
         self.assertEqual(
             updated["env"]["OTEL_EXPORTER_OTLP_ENDPOINT"], "http://localhost:4318")
+
+    def test_dp_and_compte_flags_land_in_resource_attributes(self):
+        updated = self._run("--utilisateur", "eric", "--dp", "jean",
+                            "--compte", "GroupeAI1")
+        self.assertTrue(updated["env"]["OTEL_RESOURCE_ATTRIBUTES"]
+                        .endswith(",user=eric,dp=jean,compte=GroupeAI1"))
+
+    def test_without_flags_nor_terminal_dp_and_compte_stay_absent(self):
+        updated = self._run()
+        attrs = updated["env"]["OTEL_RESOURCE_ATTRIBUTES"]
+        self.assertNotIn("dp=", attrs)
+        self.assertNotIn("compte=", attrs)
+
+    def test_rerun_preserves_dp_and_compte_from_the_existing_settings(self):
+        # Machine deja installee avec dp/compte : les relances scriptees
+        # (stdin non interactif, aucun flag) ne doivent pas les perdre.
+        Path(self.settings).write_text(json.dumps({
+            "env": {"OTEL_RESOURCE_ATTRIBUTES":
+                    "machine=pc,user=eric,dp=jean,compte=GroupeAI1"},
+        }), encoding="utf-8")
+        updated = self._run("--utilisateur", "eric")
+        self.assertTrue(updated["env"]["OTEL_RESOURCE_ATTRIBUTES"]
+                        .endswith(",user=eric,dp=jean,compte=GroupeAI1"))
 
 
 if __name__ == "__main__":

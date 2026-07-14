@@ -38,10 +38,14 @@ def attr(key: str, value):
     return {"key": key, "value": {"stringValue": str(value)}}
 
 
-def logs_payload(machine, records, user=None):
+def logs_payload(machine, records, user=None, dp=None, compte=None):
     resource_attrs = [attr("machine", machine)]
     if user is not None:
         resource_attrs.append(attr("user", user))
+    if dp is not None:
+        resource_attrs.append(attr("dp", dp))
+    if compte is not None:
+        resource_attrs.append(attr("compte", compte))
     return {
         "resourceLogs": [{
             "resource": {"attributes": resource_attrs},
@@ -58,10 +62,14 @@ def log_record(event_name, ms, **attrs):
     }
 
 
-def metrics_payload(machine, name, ms, value, user=None, **attrs):
+def metrics_payload(machine, name, ms, value, user=None, dp=None, compte=None, **attrs):
     resource_attrs = [attr("machine", machine)]
     if user is not None:
         resource_attrs.append(attr("user", user))
+    if dp is not None:
+        resource_attrs.append(attr("dp", dp))
+    if compte is not None:
+        resource_attrs.append(attr("compte", compte))
     return {
         "resourceMetrics": [{
             "resource": {"attributes": resource_attrs},
@@ -158,6 +166,32 @@ class TestResolveUser(unittest.TestCase):
         self.assertEqual(server.resolve_user({"user.email": "a@b.c"}, {}), "")
 
 
+class TestResolveDpCompte(unittest.TestCase):
+    """dp/compte suivent le meme contrat que user : injectes par le
+    configurateur, aucune chaine de repli, vides si absents."""
+
+    def test_reads_the_dp_resource_attribute(self):
+        self.assertEqual(server.resolve_dp({"dp": "jean"}, {}), "jean")
+
+    def test_reads_the_compte_resource_attribute(self):
+        self.assertEqual(server.resolve_compte({"compte": "GroupeAI1"}, {}), "GroupeAI1")
+
+    def test_point_attrs_win_over_resource_attrs(self):
+        self.assertEqual(server.resolve_dp({"dp": "resource"}, {"dp": "point"}), "point")
+        self.assertEqual(
+            server.resolve_compte({"compte": "resource"}, {"compte": "point"}), "point")
+
+    def test_empty_string_when_absent(self):
+        self.assertEqual(server.resolve_dp({}, {}), "")
+        self.assertEqual(server.resolve_compte({}, {}), "")
+
+    def test_keys_do_not_leak_into_each_other(self):
+        attrs = {"user": "eric", "dp": "jean", "compte": "GroupeAI1"}
+        self.assertEqual(server.resolve_user(attrs, {}), "eric")
+        self.assertEqual(server.resolve_dp(attrs, {}), "jean")
+        self.assertEqual(server.resolve_compte(attrs, {}), "GroupeAI1")
+
+
 class TestIngestLogs(ServerTestCase):
     def test_captures_prompt_text_and_client_ip(self):
         payload = logs_payload("pc-bureau", [
@@ -188,6 +222,20 @@ class TestIngestLogs(ServerTestCase):
         server.ingest_logs(payload, ip="10.0.0.1")
         (user,) = server._conn.execute("SELECT user FROM events").fetchone()
         self.assertEqual(user, "")
+
+    def test_captures_the_dp_and_compte_resource_attributes(self):
+        payload = logs_payload("pc-bureau", [
+            log_record("user_prompt", NOW_MS, prompt="salut"),
+        ], user="eric", dp="jean", compte="GroupeAI1")
+        server.ingest_logs(payload, ip="192.168.1.42")
+        row = server._conn.execute("SELECT user, dp, compte FROM events").fetchone()
+        self.assertEqual(row, ("eric", "jean", "GroupeAI1"))
+
+    def test_dp_and_compte_default_to_empty_strings_when_not_configured(self):
+        payload = logs_payload("pc-bureau", [log_record("user_prompt", NOW_MS, prompt="x")])
+        server.ingest_logs(payload, ip="10.0.0.1")
+        row = server._conn.execute("SELECT dp, compte FROM events").fetchone()
+        self.assertEqual(row, ("", ""))
 
     def test_api_request_tokens_and_cost(self):
         payload = logs_payload("pc-1", [
@@ -234,6 +282,13 @@ class TestIngestMetrics(ServerTestCase):
         self.assertEqual(row, ("pc-1", "192.168.1.7", "lines_of_code.count",
                                "added", 120.0))
 
+    def test_captures_the_dp_and_compte_resource_attributes(self):
+        payload = metrics_payload("pc-1", "commit.count", NOW_MS, 3,
+                                  user="eric", dp="jean", compte="GroupeAI1")
+        server.ingest_metrics(payload, ip="10.0.0.1")
+        row = server._conn.execute("SELECT user, dp, compte FROM metrics").fetchone()
+        self.assertEqual(row, ("eric", "jean", "GroupeAI1"))
+
     def test_captures_the_os_user_resource_attribute(self):
         payload = metrics_payload("pc-1", "commit.count", NOW_MS, 3, user="eric")
         server.ingest_metrics(payload, ip="192.168.1.7")
@@ -266,7 +321,7 @@ class TestStats(ServerTestCase):
                        decision="accept"),
             log_record("tool_decision", NOW_MS + 3, tool_name="Edit",
                        decision="reject"),
-        ], user="alice"), ip="192.168.1.10")
+        ], user="alice", dp="jean", compte="GroupeAI1"), ip="192.168.1.10")
         server.ingest_logs(logs_payload("pc-b", [
             log_record("api_request", NOW_MS, model="claude-opus-4-8",
                        input_tokens=500, output_tokens=100, cost_usd=1.50),
@@ -308,6 +363,24 @@ class TestStats(ServerTestCase):
         self.assertCountEqual(pc_a["users"], ["alice", "charlie"])
         self.assertEqual(pc_a["user"], "charlie")  # le plus recent
 
+    def test_each_machine_reports_its_dp_and_compte(self):
+        by_name = {m["machine"]: m for m in server.get_stats()["machines"]}
+        self.assertEqual(by_name["pc-a"]["dp"], "jean")
+        self.assertEqual(by_name["pc-a"]["compte"], "GroupeAI1")
+        # pc-b n'a pas declare de dp/compte a l'installation
+        self.assertEqual(by_name["pc-b"]["dp"], "")
+        self.assertEqual(by_name["pc-b"]["dps"], [])
+        self.assertEqual(by_name["pc-b"]["compte"], "")
+        self.assertEqual(by_name["pc-b"]["comptes"], [])
+
+    def test_multiple_comptes_per_machine_are_all_listed(self):
+        server.ingest_logs(logs_payload("pc-a", [
+            log_record("api_request", NOW_MS + 100, model="m"),
+        ], compte="GroupeAI2"), ip="192.168.1.10")  # meme PC, compte reattribue
+        pc_a = next(m for m in server.get_stats()["machines"] if m["machine"] == "pc-a")
+        self.assertCountEqual(pc_a["comptes"], ["GroupeAI1", "GroupeAI2"])
+        self.assertEqual(pc_a["compte"], "GroupeAI2")  # le plus recent
+
     def test_user_is_empty_when_never_configured(self):
         server.ingest_logs(logs_payload("pc-c", [
             log_record("api_request", NOW_MS, model="m"),
@@ -340,7 +413,8 @@ class TestStats(ServerTestCase):
 
     def test_totals_expose_no_machine_specific_fields(self):
         totals = server.get_stats()["totals"]
-        for key in ("by_model", "ip", "ips", "user", "users", "first_ms", "last_ms"):
+        for key in ("by_model", "ip", "ips", "user", "users",
+                    "dp", "dps", "compte", "comptes", "first_ms", "last_ms"):
             self.assertNotIn(key, totals)
 
     def test_by_model_breakdown_is_per_machine(self):
@@ -496,8 +570,9 @@ class TestMigration(unittest.TestCase):
         server.init_db()
         events_cols = {r[1] for r in server._conn.execute("PRAGMA table_info(events)")}
         metrics_cols = {r[1] for r in server._conn.execute("PRAGMA table_info(metrics)")}
-        self.assertLessEqual({"ip", "user", "prompt", "prompt_length"}, events_cols)
-        self.assertLessEqual({"ip", "user"}, metrics_cols)
+        self.assertLessEqual({"ip", "user", "dp", "compte", "prompt", "prompt_length"},
+                             events_cols)
+        self.assertLessEqual({"ip", "user", "dp", "compte"}, metrics_cols)
 
         (n_events,) = server._conn.execute("SELECT COUNT(*) FROM events").fetchone()
         (n_metrics,) = server._conn.execute("SELECT COUNT(*) FROM metrics").fetchone()
@@ -511,6 +586,8 @@ class TestMigration(unittest.TestCase):
         self.assertEqual(pc["commits"], 2)
         self.assertEqual(pc["ip"], "")  # aucune IP connue pour l'historique
         self.assertEqual(pc["user"], "")  # aucun utilisateur connu pour l'historique
+        self.assertEqual(pc["dp"], "")
+        self.assertEqual(pc["compte"], "")
 
     def test_migration_is_idempotent(self):
         server.init_db()
@@ -583,13 +660,15 @@ class TestHttpEndpoints(ServerTestCase):
     def test_os_user_flows_end_to_end_into_stats_and_prompts(self):
         self.post("/v1/logs", logs_payload("pc-w", [
             log_record("user_prompt", NOW_MS, prompt="deploie"),
-        ], user="eric"))
+        ], user="eric", dp="jean", compte="GroupeAI1"))
         self.post("/v1/metrics", metrics_payload(
-            "pc-w", "commit.count", NOW_MS, 1, user="eric"))
+            "pc-w", "commit.count", NOW_MS, 1, user="eric", dp="jean", compte="GroupeAI1"))
 
         _, stats = self.get("/api/stats")
         pc = next(m for m in stats["machines"] if m["machine"] == "pc-w")
         self.assertEqual(pc["user"], "eric")
+        self.assertEqual(pc["dp"], "jean")
+        self.assertEqual(pc["compte"], "GroupeAI1")
 
         _, prompts = self.get("/api/prompts")
         self.assertEqual(prompts["prompts"][0]["user"], "eric")

@@ -15,6 +15,13 @@ et pose dans OTEL_RESOURCE_ATTRIBUTES aux cotes de "machine=" : Claude Code
 n'expose pas nativement le nom d'utilisateur OS (seul user.email, identique
 pour tous quand un compte Pro/Max est partage).
 
+Lance dans un terminal, le script demande interactivement l'utilisateur, le
+directeur de projet (dp) et le nom du compte Claude partage (ex. GroupeAI1) ;
+la valeur deja configuree (ou detectee) est proposee par defaut, Entree la
+conserve. Les options --utilisateur/--dp/--compte court-circuitent la question
+correspondante ; sans terminal (stdin non interactif), rien n'est demande et
+les valeurs deja presentes dans settings.json sont conservees.
+
 Le collecteur (--collecteur) a une valeur par defaut (DEFAULT_COLLECTEUR, IP fixe
 du serveur central) : inutile de la retaper sur chaque machine suivie. --machine
 a lui aussi une valeur par defaut (nom d'hote de la machine courante).
@@ -23,7 +30,7 @@ Utilisation :
     python cli/configurer_machine.py                     (machine = hostname, collecteur = defaut)
     python cli/configurer_machine.py --machine pc-bureau  (etiquette explicite)
     python cli/configurer_machine.py --collecteur localhost --machine pc-bureau  (autre collecteur)
-    python cli/configurer_machine.py --utilisateur eric
+    python cli/configurer_machine.py --utilisateur eric --dp jean --compte GroupeAI1
     python cli/configurer_machine.py --sans-prompts
     python cli/configurer_machine.py --retirer                         (annule la config)
     python cli/configurer_machine.py --simuler                         (aucune ecriture)
@@ -79,13 +86,37 @@ def _encode_resource_value(value: str) -> str:
     return value.replace("%", "%25").replace(",", "%2C").replace("=", "%3D")
 
 
+def _decode_resource_value(value: str) -> str:
+    """Inverse de _encode_resource_value (ordre inverse des remplacements)."""
+    return value.replace("%3D", "=").replace("%2C", ",").replace("%25", "%")
+
+
+def parse_resource_attrs(raw: str) -> Dict[str, str]:
+    """Decompose une chaine OTEL_RESOURCE_ATTRIBUTES en dict decode.
+
+    Sert a re-proposer les valeurs deja configurees (user/dp/compte) comme
+    defauts quand le script est relance sur une machine deja installee.
+    """
+    out: Dict[str, str] = {}
+    for part in (raw or "").split(","):
+        if "=" in part:
+            key, value = part.split("=", 1)
+            out[key.strip()] = _decode_resource_value(value.strip())
+    return out
+
+
 def build_env(collecteur: str, machine: str, port: int = DEFAULT_PORT,
-              log_prompts: bool = True, os_user: str | None = None) -> Dict[str, str]:
+              log_prompts: bool = True, os_user: str | None = None,
+              dp: str = "", compte: str = "") -> Dict[str, str]:
     """Variables a poser pour que Claude Code emette vers le Moniteur."""
     if os_user is None:
         os_user = detect_os_user()
     resource_attrs = (f"machine={_encode_resource_value(machine)}"
                       f",user={_encode_resource_value(os_user)}")
+    if dp:
+        resource_attrs += f",dp={_encode_resource_value(dp)}"
+    if compte:
+        resource_attrs += f",compte={_encode_resource_value(compte)}"
     return {
         "CLAUDE_CODE_ENABLE_TELEMETRY": "1",
         "OTEL_METRICS_EXPORTER": "otlp",
@@ -101,6 +132,41 @@ def build_env(collecteur: str, machine: str, port: int = DEFAULT_PORT,
         # Les reponses de Claude ne nous interessent pas : volume + confidentialite.
         "OTEL_LOG_ASSISTANT_RESPONSES": "0",
     }
+
+
+def demander(label: str, defaut: str = "") -> str:
+    """Pose une question dans le terminal ; Entree conserve la valeur par defaut."""
+    suffixe = f" [{defaut}]" if defaut else ""
+    try:
+        reponse = input(f"{label}{suffixe} : ").strip()
+    except EOFError:
+        return defaut
+    return reponse or defaut
+
+
+def resoudre_identite(utilisateur: str | None, dp: str | None, compte: str | None,
+                      existants: Dict[str, str], interactif: bool,
+                      poser=demander) -> tuple[str, str, str]:
+    """Complete utilisateur/dp/compte : option CLI > question interactive > existant.
+
+    `existants` est le contenu decode de l'OTEL_RESOURCE_ATTRIBUTES deja en
+    place (vide pour une premiere installation) : relancer le script ne perd
+    jamais une valeur saisie precedemment.
+    """
+    if interactif:
+        if utilisateur is None:
+            utilisateur = poser("Utilisateur", existants.get("user") or detect_os_user())
+        if dp is None:
+            dp = poser("Directeur de projet (dp)", existants.get("dp", ""))
+        if compte is None:
+            compte = poser("Compte Claude (ex. GroupeAI1)", existants.get("compte", ""))
+    if utilisateur is None:
+        utilisateur = detect_os_user()
+    if dp is None:
+        dp = existants.get("dp", "")
+    if compte is None:
+        compte = existants.get("compte", "")
+    return utilisateur, dp, compte
 
 
 def load_settings(path: Path) -> Dict[str, Any]:
@@ -165,6 +231,10 @@ def main() -> int:
     ap.add_argument("--utilisateur", "-u", default=None,
                     help="Nom d'utilisateur affiche dans le tableau de bord "
                          "(defaut : utilisateur systeme courant)")
+    ap.add_argument("--dp", default=None,
+                    help="Directeur de projet responsable de cette machine")
+    ap.add_argument("--compte", default=None,
+                    help="Nom du compte Claude partage (ex. GroupeAI1)")
     ap.add_argument("--sans-prompts", action="store_true", dest="sans_prompts",
                     help="Ne pas enregistrer le texte des prompts "
                          "(compteurs et couts uniquement)")
@@ -191,13 +261,22 @@ def main() -> int:
         action = "retiree de"
         details = ""
     else:
-        os_user = args.utilisateur if args.utilisateur is not None else detect_os_user()
+        env_actuel = settings.get("env")
+        existants = parse_resource_attrs(
+            env_actuel.get("OTEL_RESOURCE_ATTRIBUTES", "")
+            if isinstance(env_actuel, dict) else "")
+        os_user, dp, compte = resoudre_identite(
+            args.utilisateur, args.dp, args.compte, existants,
+            interactif=sys.stdin.isatty())
         env = build_env(args.collecteur, args.machine, args.port,
-                        log_prompts=not args.sans_prompts, os_user=os_user)
+                        log_prompts=not args.sans_prompts, os_user=os_user,
+                        dp=dp, compte=compte)
         updated = merge_env(settings, env)
         action = "ecrite dans"
         details = (f"  machine  : {args.machine}\n"
                    f"  utilisateur : {os_user}\n"
+                   f"  directeur de projet : {dp or '-'}\n"
+                   f"  compte   : {compte or '-'}\n"
                    f"  endpoint : {env['OTEL_EXPORTER_OTLP_ENDPOINT']}\n"
                    f"  prompts  : {'enregistres' if not args.sans_prompts else 'non enregistres'}\n")
 

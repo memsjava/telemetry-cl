@@ -211,7 +211,7 @@ La clé `env` de `settings.json` reçoit :
 | `OTEL_EXPORTER_OTLP_PROTOCOL` | `http/json` |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | `http://185.185.82.139:4318` (valeur par défaut) |
 | `OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE` | `delta` |
-| `OTEL_RESOURCE_ATTRIBUTES` | `machine=<nom-de-la-machine>,user=<utilisateur-systeme>` |
+| `OTEL_RESOURCE_ATTRIBUTES` | `machine=<nom-de-la-machine>,user=<utilisateur-systeme>,dp=<directeur-de-projet>,compte=<compte-claude>` |
 | `OTEL_LOG_USER_PROMPTS` | `1` (enregistre le **texte** des prompts ; `0` pour ne pas le faire) |
 | `OTEL_LOG_ASSISTANT_RESPONSES` | `0` (ne pas enregistrer les réponses de Claude) |
 
@@ -231,6 +231,15 @@ est identique pour tout le monde quand un compte Pro/Max est partagé. C'est
 pour ça que `cli/configurer_machine.py` (ou l'installeur Node) l'ajoute
 lui-même dans `OTEL_RESOURCE_ATTRIBUTES`, aux côtés de `machine=`.
 
+Même logique pour le **directeur de projet** (`dp=`) et le **nom du compte
+Claude partagé** (`compte=`, ex. `GroupeAI1`) : lancé dans un terminal,
+l'installeur demande interactivement l'utilisateur, le DP et le compte (Entrée
+conserve la valeur proposée — celle déjà configurée, ou détectée). Les options
+`--utilisateur`, `--dp` et `--compte` court-circuitent les questions ; hors
+terminal (lancement scripté), rien n'est demandé et les valeurs déjà
+configurées sont conservées. Ces champs sont facultatifs : absents, le tableau
+de bord affiche simplement « — ».
+
 ---
 
 ## 3. Utiliser Claude Code… et regarder
@@ -243,6 +252,8 @@ Vous y trouverez, par machine et au total :
 - **Coût estimé** (USD) et **tokens** (entrée / sortie / cache) ;
 - **Adresse IP** et **utilisateur système** de chaque machine (et tous ceux
   vus, si plusieurs personnes ou réseaux se succèdent) ;
+- **Directeur de projet** et **compte Claude partagé** déclarés à
+  l'installation de chaque machine ;
 - **Sessions**, requêtes API, prompts, erreurs ;
 - le **contenu des prompts**, avec recherche plein texte et filtre par machine ;
 - **Tâches** : commits, pull requests, lignes de code ajoutées/supprimées ;
@@ -264,6 +275,7 @@ Ce qui est enregistré dépend de la configuration :
 | Compteurs (tokens, coût, sessions, outils, commits…) | toujours |
 | Adresse IP de la machine émettrice | toujours (lue sur la connexion) |
 | Utilisateur système (session Windows/Mac/Linux) | toujours (posé par le configurateur dans `OTEL_RESOURCE_ATTRIBUTES`) |
+| Directeur de projet et compte Claude (`dp=`, `compte=`) | si renseignés à l'installation (questions interactives ou `--dp`/`--compte`) |
 | **Texte des prompts** | **oui, si `OTEL_LOG_USER_PROMPTS=1`** (valeur par défaut posée par le configurateur) |
 | Réponses de Claude | non (`OTEL_LOG_ASSISTANT_RESPONSES=0`) |
 

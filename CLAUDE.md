@@ -66,9 +66,15 @@ identical to `buildEnv()`/`build_env()`'s output keys by both test suites).
 
 Both auto-detect the OS username (`detect_os_user()` / `detectOsUser()`, wrapping `getpass.getuser()` /
 `os.userInfo().username`) and pack it into `OTEL_RESOURCE_ATTRIBUTES` alongside `machine=`, e.g.
-`machine=pc-bureau,user=eric` — override with `--utilisateur`. Claude Code does **not** expose the OS login name
-natively (only `user.email`, identical for everyone on a shared Pro/Max account), so this is a value *we* inject,
-not something OTel/Claude Code provides. Values are percent-encoded (`_encode_resource_value` /
+`machine=pc-bureau,user=eric,dp=jean,compte=GroupeAI1` — override with `--utilisateur`. Claude Code does **not**
+expose the OS login name natively (only `user.email`, identical for everyone on a shared Pro/Max account), so this
+is a value *we* inject, not something OTel/Claude Code provides. Same story for `dp=` (directeur de projet) and
+`compte=` (shared Claude account name): when run in a real terminal both installers prompt interactively for
+user/dp/compte (Enter keeps the proposed default — the already-configured value, parsed back out of the existing
+`OTEL_RESOURCE_ATTRIBUTES` by `parse_resource_attrs` / `parseResourceAttributes`), `--dp`/`--compte` skip the
+corresponding question, and with no TTY (scripted runs, the test suites) nothing is asked and existing values are
+preserved (`resoudre_identite` / `resoudreIdentite` holds that precedence logic on both sides). Empty `dp`/`compte`
+are omitted from the attrs string, not written as `dp=`. Values are percent-encoded (`_encode_resource_value` /
 `encodeResourceValue`) since `,`/`=` are the `OTEL_RESOURCE_ATTRIBUTES` delimiters.
 
 A third, older approach (shell-profile / Windows user env vars instead of `settings.json`) existed as

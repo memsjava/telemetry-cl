@@ -16,11 +16,14 @@ import {
   DEFAULT_PORT,
   MANAGED_KEYS,
   buildEnv,
+  decodeResourceValue,
   detectOsUser,
   encodeResourceValue,
   loadSettings,
   mergeEnv,
+  parseResourceAttributes,
   removeEnv,
+  resoudreIdentite,
   writeSettings,
 } from "../lib/config.js";
 
@@ -55,6 +58,22 @@ describe("buildEnv", () => {
     // casser le parsing des attributs suivants.
     const env = buildEnv("localhost", "pc", { osUser: "a,b=c" });
     assert.equal(env.OTEL_RESOURCE_ATTRIBUTES, "machine=pc,user=a%2Cb%3Dc");
+  });
+
+  test("dp et compte atterrissent dans OTEL_RESOURCE_ATTRIBUTES", () => {
+    const env = buildEnv("localhost", "pc", { osUser: "eric", dp: "jean", compte: "GroupeAI1" });
+    assert.equal(env.OTEL_RESOURCE_ATTRIBUTES, "machine=pc,user=eric,dp=jean,compte=GroupeAI1");
+  });
+
+  test("dp et compte vides sont omis de OTEL_RESOURCE_ATTRIBUTES", () => {
+    // Pas de "dp=" vide : le serveur traite deja l'absence comme "".
+    const env = buildEnv("localhost", "pc", { osUser: "eric" });
+    assert.equal(env.OTEL_RESOURCE_ATTRIBUTES, "machine=pc,user=eric");
+  });
+
+  test("les valeurs de dp et compte sont encodees en pourcent", () => {
+    const env = buildEnv("localhost", "pc", { osUser: "eric", dp: "a,b", compte: "c=d" });
+    assert.equal(env.OTEL_RESOURCE_ATTRIBUTES, "machine=pc,user=eric,dp=a%2Cb,compte=c%3Dd");
   });
 
   test("le protocole est http/json car le serveur ne lit pas le protobuf", () => {
@@ -95,6 +114,78 @@ describe("encodeResourceValue", () => {
 
   test("le signe pourcent est encode en premier pour rester reversible", () => {
     assert.equal(encodeResourceValue("100%"), "100%25");
+  });
+});
+
+describe("parseResourceAttributes", () => {
+  test("aller-retour avec buildEnv", () => {
+    const env = buildEnv("h", "pc", { osUser: "a,b=c", dp: "100%", compte: "GroupeAI1" });
+    assert.deepEqual(parseResourceAttributes(env.OTEL_RESOURCE_ATTRIBUTES), {
+      machine: "pc", user: "a,b=c", dp: "100%", compte: "GroupeAI1",
+    });
+  });
+
+  test("une chaine vide donne un objet vide", () => {
+    assert.deepEqual(parseResourceAttributes(""), {});
+  });
+
+  test("les segments sans egal sont ignores", () => {
+    assert.deepEqual(parseResourceAttributes("machine=pc,garbage,user=eric"),
+      { machine: "pc", user: "eric" });
+  });
+
+  test("decodeResourceValue inverse encodeResourceValue", () => {
+    for (const value of ["eric", "a,b=c", "100%", "a%2Cb"]) {
+      assert.equal(decodeResourceValue(encodeResourceValue(value)), value);
+    }
+  });
+});
+
+describe("resoudreIdentite", () => {
+  // flags CLI > question interactive > valeurs deja configurees.
+
+  test("les flags court-circuitent toutes les questions", async () => {
+    const questions = [];
+    const poser = async (label) => { questions.push(label); return "ne-doit-pas-servir"; };
+    const got = await resoudreIdentite(
+      { utilisateur: "eric", dp: "jean", compte: "GroupeAI1" }, {}, poser);
+    assert.deepEqual(got, { osUser: "eric", dp: "jean", compte: "GroupeAI1" });
+    assert.deepEqual(questions, []);
+  });
+
+  test("le mode interactif ne demande que les valeurs manquantes", async () => {
+    const reponses = {
+      "Directeur de projet (dp)": "jean",
+      "Compte Claude (ex. GroupeAI1)": "GroupeAI1",
+    };
+    const questions = [];
+    const poser = async (label, defaut) => { questions.push(label); return reponses[label] ?? defaut; };
+    const got = await resoudreIdentite({ utilisateur: "eric" }, {}, poser);
+    assert.deepEqual(got, { osUser: "eric", dp: "jean", compte: "GroupeAI1" });
+    assert.equal(questions.length, 2);
+  });
+
+  test("les defauts interactifs viennent de la configuration existante", async () => {
+    const defauts = [];
+    const poser = async (label, defaut) => { defauts.push(defaut); return defaut; };
+    const existants = { user: "alice", dp: "jean", compte: "GroupeAI1" };
+    const got = await resoudreIdentite({}, existants, poser);
+    assert.deepEqual(got, { osUser: "alice", dp: "jean", compte: "GroupeAI1" });
+    assert.deepEqual(defauts, ["alice", "jean", "GroupeAI1"]);
+  });
+
+  test("sans terminal, dp et compte existants sont conserves", async () => {
+    const got = await resoudreIdentite({}, { dp: "jean", compte: "GroupeAI1" }, null);
+    assert.equal(got.osUser, detectOsUser());
+    assert.equal(got.dp, "jean");
+    assert.equal(got.compte, "GroupeAI1");
+  });
+
+  test("sans terminal, une premiere installation donne dp et compte vides", async () => {
+    const got = await resoudreIdentite({}, {}, null);
+    assert.equal(got.osUser, detectOsUser());
+    assert.equal(got.dp, "");
+    assert.equal(got.compte, "");
   });
 });
 
@@ -308,5 +399,28 @@ describe("valeurs par defaut du CLI (sous-processus)", () => {
   test("un collecteur explicite ecrase la valeur par defaut", async () => {
     const updated = await runCli("--collecteur", "localhost");
     assert.equal(updated.env.OTEL_EXPORTER_OTLP_ENDPOINT, `http://localhost:${DEFAULT_PORT}`);
+  });
+
+  test("les flags --dp et --compte atterrissent dans les attributs", async () => {
+    const updated = await runCli("--utilisateur", "eric", "--dp", "jean",
+      "--compte", "GroupeAI1");
+    assert.match(updated.env.OTEL_RESOURCE_ATTRIBUTES,
+      /,user=eric,dp=jean,compte=GroupeAI1$/);
+  });
+
+  test("sans flag ni terminal, dp et compte restent absents", async () => {
+    const updated = await runCli();
+    assert.doesNotMatch(updated.env.OTEL_RESOURCE_ATTRIBUTES, /dp=|compte=/);
+  });
+
+  test("une relance conserve dp et compte deja configures", async () => {
+    // Machine deja installee : les relances scriptees (stdin non interactif,
+    // aucun flag) ne doivent pas perdre les valeurs saisies a l'installation.
+    await fs.writeFile(settingsPath, JSON.stringify({
+      env: { OTEL_RESOURCE_ATTRIBUTES: "machine=pc,user=eric,dp=jean,compte=GroupeAI1" },
+    }));
+    const updated = await runCli("--utilisateur", "eric");
+    assert.match(updated.env.OTEL_RESOURCE_ATTRIBUTES,
+      /,user=eric,dp=jean,compte=GroupeAI1$/);
   });
 });

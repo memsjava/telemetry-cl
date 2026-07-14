@@ -183,6 +183,8 @@ function render(){
     const ipSub = (d.ips && d.ips.length>1) ? `+${d.ips.length-1} autre(s) IP` : "derniere IP vue";
     const userSub = (d.users && d.users.length>1) ? `+${d.users.length-1} autre(s)` : "derniere session vue";
     cards = card("Utilisateur", esc(d.user||"—"), userSub, "sm")
+          + card("Dir. de projet", esc(d.dp||"—"), "declare a l'installation", "sm")
+          + card("Compte", esc(d.compte||"—"), "compte Claude partage", "sm")
           + card("Adresse IP", esc(d.ip||"—"), ipSub, "sm") + cards;
   }
   document.getElementById("cards").innerHTML = cards;
@@ -203,6 +205,7 @@ function renderMachines(){
     el.innerHTML='<div class="empty">Aucune machine n\'a encore envoye de donnees.</div>'; return; }
 
   let h = `<table><thead><tr><th>Machine</th><th class="user">Utilisateur</th>
+    <th class="user">DP</th><th class="user">Compte</th>
     <th class="ip">Adresse IP</th>
     <th class="num">Cout</th><th class="num">Tokens</th><th class="num">Sessions</th>
     <th class="num">Prompts</th><th>Derniere activite (UTC)</th></tr></thead><tbody>`;
@@ -210,6 +213,8 @@ function renderMachines(){
     const listCell = (list)=> list.length ? esc(list[0]) + (list.length>1
       ? ` <span class="muted">+${list.length-1}</span>` : "") : "—";
     h += `<tr><td>${esc(m.machine)}</td><td class="user">${listCell(m.users||[])}</td>
+      <td class="user">${listCell(m.dps||[])}</td>
+      <td class="user">${listCell(m.comptes||[])}</td>
       <td class="ip">${listCell(m.ips||[])}</td>
       <td class="num">${usd(m.cost_usd)}</td><td class="num">${fmt(m.tokens.total)}</td>
       <td class="num">${fmt(m.sessions)}</td><td class="num">${fmt(m.prompts)}</td>
