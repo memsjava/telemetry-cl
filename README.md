@@ -267,6 +267,9 @@ Vous y trouverez, par machine et au total :
   vus, si plusieurs personnes ou réseaux se succèdent) ;
 - **Directeur de projet** et **compte Claude partagé** déclarés à
   l'installation de chaque machine ;
+- les **dates d'installation et de désinstallation** de chaque machine (les
+  installeurs npx/Python signalent l'opération au collecteur ; une machine
+  retirée reste listée avec la mention « retirée le ... ») ;
 - **Sessions**, requêtes API, prompts, erreurs ;
 - le **contenu des prompts**, avec recherche plein texte et filtre par machine ;
 - **Tâches** : commits, pull requests, lignes de code ajoutées/supprimées ;

@@ -14,6 +14,7 @@ import json
 import sqlite3
 import tempfile
 import threading
+import time
 import unittest
 import urllib.error
 import urllib.request
@@ -415,7 +416,8 @@ class TestStats(ServerTestCase):
     def test_totals_expose_no_machine_specific_fields(self):
         totals = server.get_stats()["totals"]
         for key in ("by_model", "ip", "ips", "user", "users",
-                    "dp", "dps", "compte", "comptes", "first_ms", "last_ms"):
+                    "dp", "dps", "compte", "comptes", "first_ms", "last_ms",
+                    "installation_ms", "desinstallation_ms"):
             self.assertNotIn(key, totals)
 
     def test_by_model_breakdown_is_per_machine(self):
@@ -443,6 +445,77 @@ class TestStats(ServerTestCase):
         ]), ip="10.0.0.9")
         pc_c = next(m for m in server.get_stats()["machines"] if m["machine"] == "pc-c")
         self.assertEqual(pc_c["sessions"], 2)
+
+
+class TestInstallation(ServerTestCase):
+    """Pings d'installation / desinstallation des installeurs (npx et python)."""
+
+    PING = {"action": "installation", "machine": "pc-a", "utilisateur": "eric",
+            "dp": "jean", "compte": "GroupeAI1"}
+
+    def test_creates_a_dated_event_with_the_full_identity(self):
+        avant = int(time.time() * 1000)
+        action = server.ingest_installation(dict(self.PING), ip="10.0.0.1")
+        apres = int(time.time() * 1000)
+        self.assertEqual(action, "installation")
+        row = server._conn.execute(
+            "SELECT ts_ms, machine, ip, user, dp, compte, name FROM events"
+        ).fetchone()
+        self.assertEqual(row[1:], ("pc-a", "10.0.0.1", "eric", "jean",
+                                   "GroupeAI1", "installation"))
+        # l'horodatage vient de l'horloge du serveur, pas du client
+        self.assertTrue(avant <= row[0] <= apres)
+
+    def test_rejects_an_unknown_action(self):
+        with self.assertRaises(ValueError):
+            server.ingest_installation({"action": "reboot", "machine": "pc"}, "")
+
+    def test_rejects_a_missing_machine(self):
+        with self.assertRaises(ValueError):
+            server.ingest_installation({"action": "installation"}, "")
+        with self.assertRaises(ValueError):
+            server.ingest_installation(
+                {"action": "installation", "machine": "  "}, "")
+
+    def test_stats_expose_the_installation_date(self):
+        server.ingest_installation(dict(self.PING), ip="10.0.0.1")
+        pc = next(m for m in server.get_stats()["machines"]
+                  if m["machine"] == "pc-a")
+        self.assertIsNotNone(pc["installation_ms"])
+        self.assertIsNone(pc["desinstallation_ms"])
+
+    def test_stats_expose_the_desinstallation_date(self):
+        server.ingest_installation(dict(self.PING), ip="10.0.0.1")
+        server.ingest_installation(
+            {"action": "desinstallation", "machine": "pc-a"}, ip="10.0.0.1")
+        pc = next(m for m in server.get_stats()["machines"]
+                  if m["machine"] == "pc-a")
+        self.assertIsNotNone(pc["desinstallation_ms"])
+        self.assertGreaterEqual(pc["desinstallation_ms"], pc["installation_ms"])
+
+    def test_machine_appears_on_the_dashboard_as_soon_as_installed(self):
+        # Aucune telemetrie encore : le ping suffit a faire exister la machine.
+        server.ingest_installation(dict(self.PING), ip="10.0.0.1")
+        stats = server.get_stats()
+        pc = next(m for m in stats["machines"] if m["machine"] == "pc-a")
+        self.assertEqual(pc["cost_usd"], 0.0)
+        self.assertEqual(pc["user"], "eric")
+
+    def test_date_is_never_none_d_by_the_period_filter(self):
+        # La date d'installation est une propriete de la machine : elle reste
+        # visible meme quand le ping est plus vieux que la periode affichee.
+        server.ingest_installation(dict(self.PING), ip="10.0.0.1")
+        with server._db_lock:
+            server._conn.execute("UPDATE events SET ts_ms=1 WHERE name='installation'")
+            # une activite recente maintient la machine dans la fenetre
+            server._conn.commit()
+        server.ingest_logs(logs_payload("pc-a", [
+            log_record("api_request", int(time.time() * 1000),
+                       model="m"),
+        ]), ip="10.0.0.1")
+        pc = next(m for m in server.get_stats(days=7)["machines"]
+                  if m["machine"] == "pc-a")
+        self.assertEqual(pc["installation_ms"], 1)
 
 
 class TestActivite(ServerTestCase):
@@ -871,6 +944,21 @@ class TestHttpEndpoints(HttpTestCase):
         self.assertIn("bob", text)
         self.assertNotIn("alice", text)
 
+    def test_installation_ping_flows_into_stats(self):
+        status, _ = self.post("/v1/installation", {
+            "action": "installation", "machine": "pc-npx",
+            "utilisateur": "eric", "dp": "jean", "compte": "GroupeAI1"})
+        self.assertEqual(status, 200)
+        _, stats = self.get("/api/stats")
+        pc = next(m for m in stats["machines"] if m["machine"] == "pc-npx")
+        self.assertIsNotNone(pc["installation_ms"])
+        self.assertEqual(pc["ip"], "127.0.0.1")  # IP lue sur la connexion
+
+    def test_installation_ping_with_a_bad_action_is_400(self):
+        with self.assertRaises(urllib.error.HTTPError) as ctx:
+            self.post("/v1/installation", {"action": "reboot", "machine": "pc"})
+        self.assertEqual(ctx.exception.code, 400)
+
     def test_export_csv_downloads_as_attachment(self):
         self.post("/v1/logs", logs_payload("pc-a", [
             log_record("api_request", NOW_MS, model="m", input_tokens=10,
@@ -1058,6 +1146,11 @@ class TestAuth(HttpTestCase):
         status, _ = self.post("/v1/logs", logs_payload("pc-a", [
             log_record("user_prompt", NOW_MS, prompt="sans auth"),
         ]))
+        self.assertEqual(status, 200)
+
+    def test_installation_ping_stays_open_without_any_session(self):
+        status, _ = self.post("/v1/installation",
+                              {"action": "installation", "machine": "pc-a"})
         self.assertEqual(status, 200)
 
     def test_health_stays_open(self):

@@ -11,7 +11,9 @@ import platform
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 from cli import configurer_machine as cm
@@ -315,6 +317,61 @@ class TestSettingsFile(unittest.TestCase):
 
         cm.write_settings(self.path, cm.remove_env(after))
         self.assertEqual(cm.load_settings(self.path), before)
+
+
+class TestSignalerInstallation(unittest.TestCase):
+    """Ping de datation envoye au collecteur a l'install / au retrait."""
+
+    def setUp(self):
+        self.recu = {}
+        recu = self.recu
+
+        class Collecteur(BaseHTTPRequestHandler):
+            def do_POST(self):
+                longueur = int(self.headers.get("Content-Length") or 0)
+                recu["path"] = self.path
+                recu["corps"] = json.loads(self.rfile.read(longueur))
+                self.send_response(200)
+                self.send_header("Content-Length", "2")
+                self.end_headers()
+                self.wfile.write(b"{}")
+
+            def log_message(self, fmt, *args):
+                pass
+
+        self.httpd = HTTPServer(("127.0.0.1", 0), Collecteur)
+        self.endpoint = f"http://127.0.0.1:{self.httpd.server_address[1]}"
+        self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
+        self.thread.start()
+
+    def tearDown(self):
+        self.httpd.shutdown()
+        self.httpd.server_close()
+        self.thread.join(timeout=5)
+
+    def test_posts_the_full_identity_to_the_collector(self):
+        ok = cm.signaler_installation(self.endpoint, "installation", "pc-a",
+                                      "eric", "jean", "GroupeAI1")
+        self.assertTrue(ok)
+        self.assertEqual(self.recu["path"], "/v1/installation")
+        self.assertEqual(self.recu["corps"], {
+            "action": "installation", "machine": "pc-a",
+            "utilisateur": "eric", "dp": "jean", "compte": "GroupeAI1"})
+
+    def test_desinstallation_action_is_sent_verbatim(self):
+        cm.signaler_installation(self.endpoint, "desinstallation", "pc-a")
+        self.assertEqual(self.recu["corps"]["action"], "desinstallation")
+
+    def test_trailing_slash_in_endpoint_is_tolerated(self):
+        self.assertTrue(cm.signaler_installation(
+            self.endpoint + "/", "installation", "pc-a"))
+        self.assertEqual(self.recu["path"], "/v1/installation")
+
+    def test_unreachable_collector_returns_false_without_raising(self):
+        # Port 9 (discard) : connexion refusee immediatement. L'installation
+        # elle-meme ne doit jamais echouer a cause du collecteur.
+        self.assertFalse(cm.signaler_installation(
+            "http://127.0.0.1:9", "installation", "pc-a", timeout=1.0))
 
 
 class TestTemplateStaysInSync(unittest.TestCase):

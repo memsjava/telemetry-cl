@@ -16,7 +16,7 @@ tracked machine just points OTLP at this collector; there is no auth token to ma
 python server.py                        # listens on 0.0.0.0:4318
 python server.py --port 4319 --host 127.0.0.1
 
-python -m unittest discover -p "test_*.py"             # full suite (184 tests), run from repo root
+python -m unittest discover -p "test_*.py"             # full suite (198 tests), run from repo root
 python -m unittest tests.test_server.TestPrompts -v            # one class
 python -m unittest tests.test_server.TestPrompts.test_search   # one test
 ```
@@ -41,7 +41,7 @@ in `tests/` (plural, with `__init__.py`), Node's in `test/` (singular, no packag
 ecosystem's own convention rather than picking one name for both.
 
 ```bash
-node --test                              # Node suite (52 tests) — auto-discovers test/*.test.js
+node --test                              # Node suite (56 tests) — auto-discovers test/*.test.js
 ```
 
 There is no linter or CI config. The repo lives at `git@github.com:memsjava/telemetry-cl.git` — confirm with the
@@ -66,6 +66,16 @@ tests on both sides, e.g. `TestTemplateStaysInSync` / `"le template reste synchr
 
 Both **merge** the OTEL vars into the `env` key of `~/.claude/settings.json` (Claude Code applies that to every
 session). They preserve existing settings and write a `.bak`; `--retirer` cleanly reverses it.
+
+After a successful write (never under `--simuler`), both installers **ping the collector** —
+`signaler_installation()` / `signalerInstallation()`, POST `/v1/installation` with
+`{action: installation|desinstallation, machine, utilisateur, dp, compte}` — so the dashboard can show each
+machine's install/uninstall date. The ping is deliberately fire-and-forget (unreachable collector ⇒ warning,
+never a failed install), the SERVER's clock stamps the event (client clocks are unreliable), and `--retirer`
+reports to the endpoint found in the settings being removed, not the CLI defaults. Server side it lands in
+`events` as `name='installation'/'desinstallation'` (`ingest_installation`), and `get_stats` exposes
+`installation_ms`/`desinstallation_ms` per machine — queried WITHOUT the period cutoff, since an install date
+is a property of the machine, not activity in the window. The route is unauthenticated like all of `/v1/*`.
 `claude-settings.template.json` is the same block for hand-copying, shared by both installers (and asserted
 identical to `buildEnv()`/`build_env()`'s output keys by both test suites).
 

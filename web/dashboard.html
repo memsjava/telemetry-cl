@@ -282,10 +282,18 @@ function render(){
   } else {
     const ipSub = (d.ips && d.ips.length>1) ? `+${d.ips.length-1} autre(s) IP` : "derniere IP vue";
     const userSub = (d.users && d.users.length>1) ? `+${d.users.length-1} autre(s)` : "derniere session vue";
+    const desinstalle = d.desinstallation_ms
+      && (!d.installation_ms || d.desinstallation_ms > d.installation_ms);
+    const instSub = desinstalle
+      ? `retiree le ${tsFmt(d.desinstallation_ms).slice(0,10)}`
+      : (d.installation_ms ? "configurateur npx / python" : "jamais signalee");
     cards = card("Utilisateur", esc(d.user||"—"), userSub, "sm")
           + card("Dir. de projet", esc(d.dp||"—"), "declare a l'installation", "sm")
           + card("Compte", esc(d.compte||"—"), "compte Claude partage", "sm")
-          + card("Adresse IP", esc(d.ip||"—"), ipSub, "sm") + cards;
+          + card("Adresse IP", esc(d.ip||"—"), ipSub, "sm")
+          + card("Installation", d.installation_ms
+              ? esc(tsFmt(d.installation_ms).slice(0,10)) : "—", instSub, "sm")
+          + cards;
   }
   document.getElementById("cards").innerHTML = cards;
 
@@ -311,7 +319,17 @@ const SORT_VALUES = {
   sessions: m=>m.sessions,
   prompts: m=>m.prompts,
   last_ms: m=>m.last_ms||0,
+  installation_ms: m=>m.installation_ms||0,
 };
+
+function etatInstallation(m){
+  const desinstalle = m.desinstallation_ms
+    && (!m.installation_ms || m.desinstallation_ms > m.installation_ms);
+  if(desinstalle)
+    return `<span class="pill rej">retiree ${tsFmt(m.desinstallation_ms).slice(0,10)}</span>`;
+  if(m.installation_ms) return esc(tsFmt(m.installation_ms).slice(0,10));
+  return "—";
+}
 
 function trierMachines(key){
   SORT = {key, dir: SORT.key===key ? -SORT.dir : -1};
@@ -346,7 +364,8 @@ function renderMachines(){
     ${th("dp","DP","user")}${th("compte","Compte","user")}
     <th class="ip">Adresse IP</th>
     ${th("cost_usd","Cout","num")}${th("tokens","Tokens","num")}${th("sessions","Sessions","num")}
-    ${th("prompts","Prompts","num")}${th("last_ms","Derniere activite (UTC)")}</tr></thead><tbody>`;
+    ${th("prompts","Prompts","num")}${th("installation_ms","Installation")}
+    ${th("last_ms","Derniere activite (UTC)")}</tr></thead><tbody>`;
   for(const m of rows){
     const listCell = (list)=> list.length ? esc(list[0]) + (list.length>1
       ? ` <span class="muted">+${list.length-1}</span>` : "") : "—";
@@ -356,6 +375,7 @@ function renderMachines(){
       <td class="ip">${listCell(m.ips||[])}</td>
       <td class="num">${usd(m.cost_usd)}</td><td class="num">${fmt(m.tokens.total)}</td>
       <td class="num">${fmt(m.sessions)}</td><td class="num">${fmt(m.prompts)}</td>
+      <td class="time">${etatInstallation(m)}</td>
       <td class="time">${m.last_ms? esc(tsFmt(m.last_ms)) : "—"}</td></tr>`;
   }
   el.innerHTML = h + "</tbody></table>";

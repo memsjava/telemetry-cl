@@ -5,6 +5,7 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { promises as fs } from "node:fs";
+import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { test, describe } from "node:test";
@@ -24,6 +25,7 @@ import {
   parseResourceAttributes,
   removeEnv,
   resoudreIdentite,
+  signalerInstallation,
   writeSettings,
 } from "../lib/config.js";
 
@@ -336,6 +338,65 @@ describe("settings.json (fichier)", () => {
 
     await writeSettings(settingsPath, removeEnv(after));
     assert.deepEqual(await loadSettings(settingsPath), before);
+  });
+});
+
+describe("signalerInstallation", () => {
+  // Ping de datation envoye au collecteur a l'install / au retrait.
+  let srv;
+  let endpoint;
+  let recu;
+
+  test.beforeEach(async () => {
+    recu = {};
+    srv = http.createServer((req, res) => {
+      recu.url = req.url;
+      let corps = "";
+      req.on("data", (c) => { corps += c; });
+      req.on("end", () => {
+        recu.corps = JSON.parse(corps);
+        res.setHeader("Content-Type", "application/json");
+        res.end("{}");
+      });
+    });
+    await new Promise((r) => srv.listen(0, "127.0.0.1", r));
+    endpoint = `http://127.0.0.1:${srv.address().port}`;
+  });
+
+  test.afterEach(async () => {
+    await new Promise((r) => srv.close(r));
+  });
+
+  test("poste l'identite complete au collecteur", async () => {
+    const ok = await signalerInstallation(endpoint, "installation",
+      { machine: "pc-a", utilisateur: "eric", dp: "jean", compte: "GroupeAI1" });
+    assert.equal(ok, true);
+    assert.equal(recu.url, "/v1/installation");
+    assert.deepEqual(recu.corps, {
+      action: "installation", machine: "pc-a",
+      utilisateur: "eric", dp: "jean", compte: "GroupeAI1",
+    });
+  });
+
+  test("l'action desinstallation est transmise telle quelle", async () => {
+    await signalerInstallation(endpoint, "desinstallation", { machine: "pc-a" });
+    assert.equal(recu.corps.action, "desinstallation");
+    assert.deepEqual(recu.corps, {
+      action: "desinstallation", machine: "pc-a",
+      utilisateur: "", dp: "", compte: "",
+    });
+  });
+
+  test("collecteur injoignable : false sans exception", async () => {
+    // Port 9 (discard) : connexion refusee immediatement. L'installation
+    // elle-meme ne doit jamais echouer a cause du collecteur.
+    assert.equal(await signalerInstallation("http://127.0.0.1:9",
+      "installation", { machine: "pc-a" }, 1000), false);
+  });
+
+  test("endpoint invalide : false sans exception", async () => {
+    assert.equal(await signalerInstallation("pas-une-url",
+      "installation", { machine: "pc-a" }), false);
   });
 });
 

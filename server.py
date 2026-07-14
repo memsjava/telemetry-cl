@@ -23,6 +23,8 @@ Routes :
     POST /v1/metrics   -> ingestion des metriques OTLP (jamais protegee)
     POST /v1/logs      -> ingestion des evenements OTLP (jamais protegee)
     POST /v1/traces    -> accepte et ignore (compat)
+    POST /v1/installation -> ping des installeurs (date d'installation /
+                          desinstallation d'une machine ; jamais protegee)
     GET  /             -> tableau de bord
     GET  /api/stats    -> donnees agregees (JSON), parametre optionnel ?days=N
     GET  /api/prompts  -> journal des prompts (?days=N&machine=X&q=recherche
@@ -359,6 +361,36 @@ def ingest_logs(payload, ip=""):
     return len(rows), prompts_seen
 
 
+def ingest_installation(payload, ip=""):
+    """Ping envoye par les installeurs (npx / python) a l'installation et a la
+    desinstallation. Stocke comme un evenement ordinaire (name='installation'
+    ou 'desinstallation') : il apparait dans l'activite recente et l'export.
+
+    L'horodatage vient du serveur, pas du client : les horloges des machines
+    suivies ne sont pas fiables.
+    """
+    action = payload.get("action")
+    if action not in ("installation", "desinstallation"):
+        raise ValueError(f"action inconnue : {action!r}")
+    machine = str(payload.get("machine") or "").strip()
+    if not machine:
+        raise ValueError("machine manquante")
+
+    ms = int(time.time() * 1000)
+    with _db_lock:
+        _conn.execute(
+            "INSERT INTO events (ts_ms,day,machine,ip,user,dp,compte,name)"
+            " VALUES (?,?,?,?,?,?,?,?)",
+            (ms, _day_of(ms), machine, ip,
+             str(payload.get("utilisateur") or ""),
+             str(payload.get("dp") or ""),
+             str(payload.get("compte") or ""),
+             action),
+        )
+        _conn.commit()
+    return action
+
+
 # --------------------------------------------------------------------------
 # Agregation pour le tableau de bord
 # --------------------------------------------------------------------------
@@ -394,6 +426,8 @@ def get_stats(days=0):
                 "dps": [],
                 "compte": "",
                 "comptes": [],
+                "installation_ms": None,
+                "desinstallation_ms": None,
                 "cost_usd": 0.0,
                 "tokens": {"input": 0, "output": 0, "cache_read": 0,
                            "cache_creation": 0, "total": 0},
@@ -467,6 +501,18 @@ def get_stats(days=0):
                     d[list_key].append(val)
             for d in machines.values():
                 d[col] = d[list_key][0] if d[list_key] else ""
+
+        # --- Dates d'installation / desinstallation (pings des installeurs) ---
+        # Volontairement SANS filtre de periode : la date d'installation est
+        # une propriete de la machine, pas une activite de la fenetre affichee.
+        cur.execute(
+            "SELECT machine, name, MAX(ts_ms) FROM events"
+            " WHERE name IN ('installation','desinstallation')"
+            " GROUP BY machine, name",
+        )
+        for machine, name, ms in cur.fetchall():
+            if machine in machines:  # ne ressuscite pas une machine hors periode
+                machines[machine][f"{name}_ms"] = ms
 
         # --- Decisions d'outils ---
         cur.execute(
@@ -579,7 +625,8 @@ def get_stats(days=0):
 
     totals["cost_usd"] = round(totals["cost_usd"], 4)
     for key in ("by_model", "first_ms", "last_ms", "ip", "ips", "user", "users",
-                "dp", "dps", "compte", "comptes"):
+                "dp", "dps", "compte", "comptes",
+                "installation_ms", "desinstallation_ms"):
         totals.pop(key, None)
 
     per_machine = [machines[k] for k in machines if k != "__TOTAL__"]
@@ -919,6 +966,18 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/login":
             self._handle_login()
+            return
+
+        if path == "/v1/installation":
+            try:
+                payload = json.loads(self._read_body().decode("utf-8"))
+                action = ingest_installation(payload, self.client_ip())
+            except (ValueError, UnicodeDecodeError) as e:
+                self._send(400, json.dumps({"error": str(e)}).encode("utf-8"))
+                return
+            print(f"[ok] {action} de {payload.get('machine')} "
+                  f"signalee par {self.client_ip()}")
+            self._send(200, b"{}")
             return
 
         if path not in ("/v1/metrics", "/v1/logs", "/v1/traces"):

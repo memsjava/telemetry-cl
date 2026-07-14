@@ -44,6 +44,7 @@ import json
 import platform
 import shutil
 import sys
+import urllib.request
 from pathlib import Path
 from typing import Any, Dict
 
@@ -169,6 +170,32 @@ def resoudre_identite(utilisateur: str | None, dp: str | None, compte: str | Non
     return utilisateur, dp, compte
 
 
+def signaler_installation(endpoint: str, action: str, machine: str,
+                          utilisateur: str = "", dp: str = "",
+                          compte: str = "", timeout: float = 4.0) -> bool:
+    """Signale l'(de)installation au collecteur pour dater la machine.
+
+    Non bloquant : un collecteur injoignable ne doit jamais faire echouer
+    l'installation elle-meme (False + avertissement, pas d'exception).
+    Le serveur horodate lui-meme la reception.
+    """
+    corps = json.dumps({
+        "action": action,
+        "machine": machine,
+        "utilisateur": utilisateur,
+        "dp": dp,
+        "compte": compte,
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        f"{endpoint.rstrip('/')}/v1/installation", data=corps,
+        headers={"Content-Type": "application/json"}, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as reponse:
+            return reponse.status == 200
+    except OSError:
+        return False
+
+
 def load_settings(path: Path) -> Dict[str, Any]:
     """Lit settings.json. Un fichier absent donne un reglage vide."""
     if not path.exists():
@@ -256,23 +283,33 @@ def main() -> int:
         print("Corrigez ou supprimez ce fichier, puis relancez.", file=sys.stderr)
         return 1
 
+    env_actuel = settings.get("env")
+    existants = parse_resource_attrs(
+        env_actuel.get("OTEL_RESOURCE_ATTRIBUTES", "")
+        if isinstance(env_actuel, dict) else "")
+
     if args.retirer:
+        # Le ping de desinstallation reutilise l'identite et le collecteur de
+        # la configuration qu'on retire, pas les valeurs par defaut du script.
+        endpoint_ping = (env_actuel.get("OTEL_EXPORTER_OTLP_ENDPOINT")
+                         if isinstance(env_actuel, dict) else None) \
+            or f"http://{args.collecteur}:{args.port}"
+        ping = ("desinstallation", endpoint_ping,
+                existants.get("machine") or args.machine,
+                existants.get("user", ""), existants.get("dp", ""),
+                existants.get("compte", ""))
         updated = remove_env(settings)
-        action = "retiree de"
         details = ""
     else:
-        env_actuel = settings.get("env")
-        existants = parse_resource_attrs(
-            env_actuel.get("OTEL_RESOURCE_ATTRIBUTES", "")
-            if isinstance(env_actuel, dict) else "")
         os_user, dp, compte = resoudre_identite(
             args.utilisateur, args.dp, args.compte, existants,
             interactif=sys.stdin.isatty())
         env = build_env(args.collecteur, args.machine, args.port,
                         log_prompts=not args.sans_prompts, os_user=os_user,
                         dp=dp, compte=compte)
+        ping = ("installation", env["OTEL_EXPORTER_OTLP_ENDPOINT"],
+                args.machine, os_user, dp, compte)
         updated = merge_env(settings, env)
-        action = "ecrite dans"
         details = (f"  machine  : {args.machine}\n"
                    f"  utilisateur : {os_user}\n"
                    f"  directeur de projet : {dp or '-'}\n"
@@ -286,20 +323,25 @@ def main() -> int:
         return 0
 
     try:
-        backup = write_settings(args.settings, updated)
+        write_settings(args.settings, updated)
     except OSError as e:
         print(f"Erreur d'ecriture sur {args.settings} : {e}", file=sys.stderr)
         return 1
 
-    print(f"OK - configuration {action} {args.settings}")
-    if details:
+    # Sortie volontairement sobre : pas de chemin settings.json ni de .bak
+    # (les details techniques restent visibles via --simuler).
+    if args.retirer:
+        print("Machine retiree du Moniteur Claude Code.")
+    else:
+        print("Machine configuree pour le Moniteur Claude Code.")
         print(details, end="")
-    if backup:
-        print(f"  (sauvegarde de l'ancien fichier : {backup})")
+
+    action_ping, endpoint_ping, machine_ping, user_ping, dp_ping, compte_ping = ping
+    if not signaler_installation(endpoint_ping, action_ping, machine_ping,
+                                 user_ping, dp_ping, compte_ping):
+        print(f"  avertissement : collecteur injoignable ({endpoint_ping}), "
+              f"date de {action_ping} non enregistree", file=sys.stderr)
     if not args.retirer:
-        preserved = [k for k in settings if k != "env"]
-        if preserved:
-            print(f"  reglages conserves : {', '.join(preserved)}")
         print("\nLancez 'claude' : la telemetrie part des la prochaine session.")
     return 0
 

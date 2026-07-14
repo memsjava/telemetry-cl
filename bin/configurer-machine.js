@@ -31,6 +31,7 @@ import {
   parseResourceAttributes,
   removeEnv,
   resoudreIdentite,
+  signalerInstallation,
   writeSettings,
 } from "../lib/config.js";
 
@@ -154,19 +155,30 @@ async function main(argv) {
   }
 
   let updated;
-  let action;
   let details = "";
+  let ping;
+
+  const envActuel = settings.env;
+  const existants = parseResourceAttributes(
+    envActuel && typeof envActuel === "object" && !Array.isArray(envActuel)
+      ? envActuel.OTEL_RESOURCE_ATTRIBUTES ?? ""
+      : "",
+  );
 
   if (args.retirer) {
+    // Le ping de desinstallation reutilise l'identite et le collecteur de la
+    // configuration qu'on retire, pas les valeurs par defaut du script.
+    const endpointPing = (envActuel && typeof envActuel === "object"
+      && envActuel.OTEL_EXPORTER_OTLP_ENDPOINT)
+      || `http://${args.collecteur}:${args.port}`;
+    ping = ["desinstallation", endpointPing, {
+      machine: existants.machine || args.machine,
+      utilisateur: existants.user ?? "",
+      dp: existants.dp ?? "",
+      compte: existants.compte ?? "",
+    }];
     updated = removeEnv(settings);
-    action = "retiree de";
   } else {
-    const envActuel = settings.env;
-    const existants = parseResourceAttributes(
-      envActuel && typeof envActuel === "object" && !Array.isArray(envActuel)
-        ? envActuel.OTEL_RESOURCE_ATTRIBUTES ?? ""
-        : "",
-    );
 
     // Questions interactives uniquement dans un vrai terminal : un lancement
     // scripte (stdin redirige) garde les valeurs deja configurees.
@@ -203,8 +215,9 @@ async function main(argv) {
       dp,
       compte,
     });
+    ping = ["installation", env.OTEL_EXPORTER_OTLP_ENDPOINT,
+            { machine: args.machine, utilisateur: osUser, dp, compte }];
     updated = mergeEnv(settings, env);
-    action = "ecrite dans";
     details = `  machine     : ${args.machine}\n`
       + `  utilisateur : ${osUser}\n`
       + `  directeur de projet : ${dp || "-"}\n`
@@ -219,20 +232,28 @@ async function main(argv) {
     return 0;
   }
 
-  let backup;
   try {
-    backup = await writeSettings(args.settings, updated);
+    await writeSettings(args.settings, updated);
   } catch (err) {
     console.error(`Erreur d'ecriture sur ${args.settings} : ${err.message}`);
     return 1;
   }
 
-  console.log(`OK - configuration ${action} ${args.settings}`);
-  if (details) process.stdout.write(details);
-  if (backup) console.log(`  (sauvegarde de l'ancien fichier : ${backup})`);
+  // Sortie volontairement sobre : pas de chemin settings.json ni de .bak
+  // (les details techniques restent visibles via --simuler).
+  if (args.retirer) {
+    console.log("Machine retiree du Moniteur Claude Code.");
+  } else {
+    console.log("Machine configuree pour le Moniteur Claude Code.");
+    process.stdout.write(details);
+  }
+
+  const [actionPing, endpointPing, identitePing] = ping;
+  if (!(await signalerInstallation(endpointPing, actionPing, identitePing))) {
+    console.error(`  avertissement : collecteur injoignable (${endpointPing}), `
+      + `date de ${actionPing} non enregistree`);
+  }
   if (!args.retirer) {
-    const preserved = Object.keys(settings).filter((k) => k !== "env");
-    if (preserved.length) console.log(`  reglages conserves : ${preserved.join(", ")}`);
     console.log("\nLancez 'claude' : la telemetrie part des la prochaine session.");
   }
   return 0;
